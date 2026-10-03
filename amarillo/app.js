@@ -23,9 +23,29 @@ const DISP_STYLE = {
   'Sale':'sale','Sale (WIP)':'sale','Sale (Declined)':'sale','Cancelled':'cxl',
   'Data':'info','Called To Confirm':'info','Matched':'info',
   'Set':'pend','Pending':'pend','Unentered':'pend','Issue':'pend',
-  'Unconfirmed':'pur','Demo No Sale':'pur','Demo (1-Leg)':'pur'
+  'Unconfirmed':'pur','Demo No Sale':'pur','Demo (1-Leg)':'pur',
+  'Call To Cancel':'cxl','Customer Cancel at Door':'cxl'
 };
-const DISP_OPTIONS = ['Data','Set','Unconfirmed','Called To Confirm','Cancelled','Demo No Sale','Demo (1-Leg)','Sale','Sale (WIP)','Sale (Declined)','Pending','Unentered','Issue','Matched'];
+const DISP_OPTIONS = ['Data','Set','Unconfirmed','Called To Confirm','Cancelled','Call To Cancel','Customer Cancel at Door','Demo No Sale','Demo (1-Leg)','Sale','Sale (WIP)','Sale (Declined)','Pending','Unentered','Issue','Matched'];
+
+// LeadPerfection short codes → the full names the app uses everywhere (leaderboard, KPIs, charts, pills).
+// Matching ignores upper/lower case and extra spaces. Unknown values are left exactly as they are.
+const DISP_ALIASES = {
+  'sale':'Sale',
+  'sale (wip)':'Sale (WIP)', 'sale(wip)':'Sale (WIP)',
+  'sale (dcl)':'Sale (Declined)', 'sale(dcl)':'Sale (Declined)', 'sale (declined)':'Sale (Declined)',
+  '1-leg demo':'Demo (1-Leg)', '1-leg':'Demo (1-Leg)', '1 leg demo':'Demo (1-Leg)', '1 leg':'Demo (1-Leg)', 'demo (1-leg)':'Demo (1-Leg)',
+  'dns':'Demo No Sale', 'demo no sale':'Demo No Sale',
+  'uncon':'Unconfirmed', 'unconfirmed':'Unconfirmed',
+  'cxl':'Cancelled', 'cancel':'Cancelled', 'canceled':'Cancelled', 'cancelled':'Cancelled',
+  'ctc':'Call To Cancel', 'call to cancel':'Call To Cancel',
+  'ccd':'Customer Cancel at Door', 'customer cancel at door':'Customer Cancel at Door',
+};
+function normalizeDisp(di){
+  if(di==null) return di;
+  const k = String(di).trim().replace(/\s+/g,' ').toLowerCase();
+  return DISP_ALIASES[k] || di;
+}
 const MATERIAL_OPTIONS = ['Original','Wood','Vinyl','Metal'];
 const ISSUE_OPTIONS = ['Condensation','Inoperable','Warping','Noisy','Wood Rot','Rust','Drafty','Broken Hardware','Broken Seals','Frame Rot','Cracking','Peeling Paint','Sun Fade/UV Damage'];
 const PI_OPTIONS = ['Windows','Doors','Siding','Soffit','Fascia'];
@@ -35,6 +55,8 @@ function bucket(di){
   if(!di) return 'Unknown';
   if(di.startsWith('Sale')) return 'Sale';
   if(di==='Cancelled') return 'Cancelled';
+  if(di==='Call To Cancel') return 'Call To Cancel';
+  if(di==='Customer Cancel at Door') return 'Customer Cancel at Door';
   if(di==='Demo No Sale') return 'Demo No Sale';
   if(di==='Pending'||di==='Unentered'||di==='Issue') return 'Pending / Unentered';
   if(di==='Unconfirmed') return 'Unconfirmed';
@@ -74,21 +96,57 @@ async function api(action, payload){
     const r = await fetch(url+'?action='+action);
     return r.json();
   }
+  if(action==='update' && payload && payload.fields) payload = {...payload, fields: restoreOriginalNames(payload.fields)};
   const r = await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify({action, ...payload}) });
   return r.json();
 }
 
+// The Sheet is never rewritten just because the app displays a cleaner name/disposition:
+// if a field still equals what the app translated it to, the ORIGINAL Sheet value is sent back.
+// Only a value you actually changed gets written.
+function restoreOriginalNames(fields){
+  const f = {...fields};
+  if(f._cvRaw!==undefined && f.cv===f._cvShown) f.cv = f._cvRaw;
+  if(f._diRaw!==undefined && f.di===f._diShown) f.di = f._diRaw;
+  delete f._cvRaw; delete f._cvShown; delete f._diRaw; delete f._diShown;
+  return f;
+}
+
 let SETTINGS = [];
 
-// Same name typed in different casing (e.g. "CHRISTIAN CANTON" vs "Christian Canton") is
-// almost always the same person — merge to whichever casing was entered first, everywhere.
+function parseAliases(s){ return String(s||'').split(',').map(x=>x.trim()).filter(Boolean); }
+
+// alias (lowercase) → main canvasser name, from the "Aliases" column of the Canvasser Settings tab.
+function buildAliasMap(){
+  const m = {};
+  SETTINGS.forEach(s=> parseAliases(s.aliases).forEach(a=>{ m[a.toLowerCase()] = s.cv; }));
+  // Follow chains (A → B → C) so everything lands on the final main name.
+  Object.keys(m).forEach(k=>{ let v=m[k], hops=0; while(m[String(v).toLowerCase()] && hops<5 && m[String(v).toLowerCase()]!==v){ v=m[String(v).toLowerCase()]; hops++; } m[k]=v; });
+  return m;
+}
+
+// 1) Merges a canvasser's other names (e.g. GroupMe/sign-up alias "dragonchamp98" → LP name "Roy Compton").
+// 2) Same name typed in different casing (e.g. "CHRISTIAN CANTON" vs "Christian Canton") is
+//    almost always the same person — merge to whichever casing was entered first, everywhere.
+// 3) LP disposition codes (DNS, UnCon, CXL…) → full names.
+// Always works from the original Sheet values, so it can be re-run safely whenever aliases change.
 function canonicalizeCanvassers(rows){
+  const aliasMap = buildAliasMap();
   const seen = {};
   rows.forEach(r=>{
-    const key = (r.cv||'').trim().toLowerCase();
-    if(!key) return;
-    if(!seen[key]) seen[key] = r.cv.trim();
-    r.cv = seen[key];
+    if(r._cvRaw===undefined) r._cvRaw = r.cv;
+    if(r._diRaw===undefined) r._diRaw = r.di;
+    // If a value was edited in the app since the last load, that edit is now the "original".
+    if(r._cvShown!==undefined && r.cv!==r._cvShown) r._cvRaw = r.cv;
+    if(r._diShown!==undefined && r.di!==r._diShown) r._diRaw = r.di;
+    let name = (r._cvRaw==null?'':String(r._cvRaw)).trim();
+    if(name && aliasMap[name.toLowerCase()]) name = aliasMap[name.toLowerCase()];
+    const key = name.toLowerCase();
+    if(key){ if(!seen[key]) seen[key] = name; name = seen[key]; }
+    r.cv = key ? name : r._cvRaw;
+    r._cvShown = r.cv;
+    r.di = normalizeDisp(r._diRaw);
+    r._diShown = r.di;
   });
 }
 
@@ -100,11 +158,12 @@ async function loadData(){
     const res = await api('list');
     if(!res.ok) throw new Error(res.error||'load failed');
     DATA = res.rows;
+    // Settings first now, because canvasser aliases live there and are needed before merging names.
+    try{ const sres = await api('settings'); if(sres.ok) SETTINGS = sres.settings; }catch(e){ console.error(e); }
     canonicalizeCanvassers(DATA);
     badge.textContent = 'Synced ✓ '+DATA.length+' (tap to refresh)';
     document.getElementById('mainApp').style.display='block';
     document.getElementById('setupScreen').style.display='none';
-    try{ const sres = await api('settings'); if(sres.ok) SETTINGS = sres.settings; }catch(e){ console.error(e); }
     setupViewAs();
     render();
   }catch(err){
@@ -116,6 +175,11 @@ async function loadData(){
 function setupViewAs(){
   const sel = document.getElementById('viewAs');
   const names = [...new Set(DATA.map(r=>r.cv))].sort();
+  if(viewFilter && !names.includes(viewFilter)){ // e.g. was viewing an alias that's now merged into the main name
+    const main = buildAliasMap()[viewFilter.toLowerCase()];
+    viewFilter = (main && names.includes(main)) ? main : '';
+    localStorage.setItem('mw_view_as', viewFilter);
+  }
   sel.innerHTML = '<option value="">Everyone (supervisor view)</option>' + names.map(n=>`<option ${n===viewFilter?'selected':''}>${n}</option>`).join('');
   sel.value = viewFilter;
   sel.onchange = ()=>{ viewFilter = sel.value; localStorage.setItem('mw_view_as', viewFilter); render(); };
@@ -947,6 +1011,8 @@ function renderLeaderboard(){
       <div style="font-size:12.5px;color:var(--tx2);margin-bottom:4px">Lifetime net sales: <input type="text" id="lt_${esc(cv)}" value="${b.lifetimeNet}" style="width:90px;padding:3px 6px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--tx);font-size:12px"> <button class="btn sm" onclick="saveLifetimeNet('${esc(cv)}')">Save</button></div>
       ${b.nextRaiseAt ? `<div style="background:var(--bg);border-radius:6px;height:6px"><div style="background:var(--pur);width:${raisePct}%;height:6px;border-radius:6px"></div></div><p class="note" style="margin:4px 0 10px">${fmtMoney(b.netRemainingToRaise)} more lifetime net to $${b.currentRate+1}/hr</p>` : `<p class="note" style="margin:4px 0 10px;color:var(--sale)">Pay cap reached ($${RAISE_CAP_RATE}/hr)</p>`}
 
+      ${!viewFilter ? aliasEditorHtml(cv) : ''}
+
       ${!viewFilter ? `<button class="btn sm" onclick="toggleActive('${esc(cv)}', ${active})">${active ? 'Archive this canvasser' : 'Reactivate this canvasser'}</button>` : ''}
     </div>`;
     return summary + detail;
@@ -962,6 +1028,65 @@ async function saveLifetimeNet(cv){
   const s = SETTINGS.find(x=>x.cv===cv);
   if(s) s.lifetimeNet = val; else SETTINGS.push({cv, lifetimeNet: val, active:true});
   renderLeaderboard();
+}
+
+// ----- Canvasser aliases ("Other names for this person") -----
+// Lets you merge a GroupMe / sign-up alias (e.g. "dragonchamp98") into the person's LP name
+// (e.g. "Roy Compton") from inside the app. Saved to the app's own "Canvasser Settings" tab —
+// the Tracker tab is never touched.
+function aliasEditorHtml(cv){
+  const s = SETTINGS.find(x=>x.cv===cv);
+  const current = parseAliases(s && s.aliases);
+  const others = [...new Set(DATA.map(r=>r.cv))].filter(n=>n && n!==cv).sort((a,b)=>a.localeCompare(b));
+  const chips = current.length
+    ? current.map(a=>`<span class="pill info" style="margin:0 6px 6px 0">${a} <a href="#" data-cv="${esc(cv)}" data-alias="${esc(a)}" onclick="removeAlias(this); return false;" style="color:var(--cxl);text-decoration:none;margin-left:4px">✕</a></span>`).join('')
+    : '<span class="note" style="margin:0">None yet.</span>';
+  return `<div style="border-top:1px solid var(--bd);padding-top:10px;margin:4px 0 10px">
+    <div style="font-size:12.5px;color:var(--tx2);margin-bottom:6px">Other names for this person <span class="note" style="margin:0">(GroupMe / sign-up alias — their leads count here)</span></div>
+    <div style="display:flex;flex-wrap:wrap;align-items:center;margin-bottom:6px">${chips}</div>
+    ${others.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <select style="font-size:12.5px;max-width:220px"><option value="">Pick a name to merge in…</option>${others.map(n=>`<option value="${esc(n)}">${n}</option>`).join('')}</select>
+      <button class="btn sm primary" data-cv="${esc(cv)}" onclick="addAlias(this)">Add</button>
+    </div>` : ''}
+  </div>`;
+}
+
+async function saveAliases(cv, list){
+  const aliases = list.join(', ');
+  const res = await api('saveSetting', {cv, aliases});
+  if(res && res.ok===false){ alert('Could not save: '+(res.error||'error')); return; }
+  const s = SETTINGS.find(x=>x.cv===cv);
+  if(s) s.aliases = aliases; else SETTINGS.push({cv, lifetimeNet:0, active:true, notes:'', aliases});
+  canonicalizeCanvassers(DATA);
+  expandedCanvasser = cv;
+  setupViewAs();
+  render();
+  renderLeaderboard();
+}
+
+async function addAlias(btn){
+  const cv = btn.dataset.cv;
+  const sel = btn.previousElementSibling;
+  const alias = sel && sel.value;
+  if(!alias) return;
+  btn.disabled = true; btn.textContent = 'Saving…';
+  // Names already merged INTO the alias come along with it.
+  const aliasSetting = SETTINGS.find(x=>x.cv===alias);
+  const carried = parseAliases(aliasSetting && aliasSetting.aliases);
+  // The raw spellings in the Sheet that currently show as this alias (e.g. different casing).
+  const rawSpellings = [...new Set(DATA.filter(r=>r.cv===alias).map(r=>String(r._cvRaw||'').trim()).filter(Boolean))];
+  const s = SETTINGS.find(x=>x.cv===cv);
+  const list = parseAliases(s && s.aliases);
+  [alias, ...rawSpellings, ...carried].forEach(a=>{ if(a.toLowerCase()!==cv.toLowerCase() && !list.some(x=>x.toLowerCase()===a.toLowerCase())) list.push(a); });
+  if(aliasSetting && carried.length) await api('saveSetting', {cv: alias, aliases: ''}).then(()=>{ aliasSetting.aliases=''; });
+  await saveAliases(cv, list);
+}
+
+async function removeAlias(a){
+  const cv = a.dataset.cv, alias = a.dataset.alias;
+  const s = SETTINGS.find(x=>x.cv===cv);
+  const list = parseAliases(s && s.aliases).filter(x=>x!==alias);
+  await saveAliases(cv, list);
 }
 
 async function toggleActive(cv, wasActive){
