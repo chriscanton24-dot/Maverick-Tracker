@@ -99,6 +99,7 @@ async function api(action, payload){
     return r.json();
   }
   if(action==='update' && payload && payload.fields) payload = {...payload, fields: restoreOriginalNames(payload.fields)};
+  if(action==='saveSetting' && payload && payload.cv) payload = {...payload, cv: settingCv(payload.cv)};
   const r = await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify({action, ...payload}) });
   return r.json();
 }
@@ -118,12 +119,26 @@ let SETTINGS = [];
 
 function parseAliases(s){ return String(s||'').split(',').map(x=>x.trim()).filter(Boolean); }
 
-// alias (lowercase) → main canvasser name, from the "Aliases" column of the Canvasser Settings tab.
+// LP sometimes shows a canvasser as "Last, First" (e.g. Lead Overview → "Promoter: Compton, Roy")
+// and other times as "First Last". Both are turned into "First Last" automatically, so
+// "Compton, Roy" and "Roy Compton" are always the same person — no alias needed for that.
+function personName(v){
+  const s = (v==null?'':String(v)).trim().replace(/\s+/g,' ');
+  const m = s.match(/^([^,]+),\s*([^,]+)$/);
+  return m ? (m[2].trim()+' '+m[1].trim()) : s;
+}
+function nameKey(v){ return personName(v).toLowerCase(); }
+
+// Settings rows may have been saved under either name format — match them by person, not exact text.
+function findSetting(name){ const k = nameKey(name); return SETTINGS.find(s=>nameKey(s.cv)===k); }
+function settingCv(name){ const s = findSetting(name); return s ? s.cv : name; }
+
+// alias (normalized) → main canvasser name, from the "Aliases" column of the Canvasser Settings tab.
 function buildAliasMap(){
   const m = {};
-  SETTINGS.forEach(s=> parseAliases(s.aliases).forEach(a=>{ m[a.toLowerCase()] = s.cv; }));
+  SETTINGS.forEach(s=> parseAliases(s.aliases).forEach(a=>{ m[nameKey(a)] = personName(s.cv); }));
   // Follow chains (A → B → C) so everything lands on the final main name.
-  Object.keys(m).forEach(k=>{ let v=m[k], hops=0; while(m[String(v).toLowerCase()] && hops<5 && m[String(v).toLowerCase()]!==v){ v=m[String(v).toLowerCase()]; hops++; } m[k]=v; });
+  Object.keys(m).forEach(k=>{ let v=m[k], hops=0; while(m[nameKey(v)] && hops<5 && m[nameKey(v)]!==v){ v=m[nameKey(v)]; hops++; } m[k]=v; });
   return m;
 }
 
@@ -141,8 +156,8 @@ function canonicalizeCanvassers(rows){
     // If a value was edited in the app since the last load, that edit is now the "original".
     if(r._cvShown!==undefined && r.cv!==r._cvShown) r._cvRaw = r.cv;
     if(r._diShown!==undefined && r.di!==r._diShown) r._diRaw = r.di;
-    let name = (r._cvRaw==null?'':String(r._cvRaw)).trim();
-    if(name && aliasMap[name.toLowerCase()]) name = aliasMap[name.toLowerCase()];
+    let name = personName(r._cvRaw);
+    if(name && aliasMap[nameKey(name)]) name = aliasMap[nameKey(name)];
     const key = name.toLowerCase();
     if(key){ if(!seen[key]) seen[key] = name; name = seen[key]; }
     r.cv = key ? name : r._cvRaw;
@@ -178,8 +193,8 @@ function setupViewAs(){
   const sel = document.getElementById('viewAs');
   const names = [...new Set(DATA.map(r=>r.cv))].sort();
   if(viewFilter && !names.includes(viewFilter)){ // e.g. was viewing an alias that's now merged into the main name
-    const main = buildAliasMap()[viewFilter.toLowerCase()];
-    viewFilter = (main && names.includes(main)) ? main : '';
+    const main = buildAliasMap()[nameKey(viewFilter)] || personName(viewFilter);
+    viewFilter = names.includes(main) ? main : '';
     localStorage.setItem('mw_view_as', viewFilter);
   }
   sel.innerHTML = '<option value="">Everyone (supervisor view)</option>' + names.map(n=>`<option ${n===viewFilter?'selected':''}>${n}</option>`).join('');
@@ -932,7 +947,7 @@ function computeCanvasserBoard(canvasser, period){
   const bonus = bonusFor(netThisMonth);
   const nextBonus = BONUS_TIERS.find(b=>b.min > (bonus?bonus.max:29999));
 
-  const setting = SETTINGS.find(s=>s.cv===canvasser) || {lifetimeNet:0};
+  const setting = findSetting(canvasser) || {lifetimeNet:0};
   const netIncludingThisMonth = setting.lifetimeNet; // manually maintained running total, see note in UI
   const raisesEarned = Math.min(Math.floor(netIncludingThisMonth/RAISE_PER_NET), RAISE_CAP_RATE-RAISE_START_RATE);
   const currentRate = Math.min(RAISE_START_RATE + raisesEarned, RAISE_CAP_RATE);
@@ -948,7 +963,7 @@ let showArchived = false;
 let expandedCanvasser = null;
 
 function isActiveCanvasser(cv){
-  const s = SETTINGS.find(x=>x.cv===cv);
+  const s = findSetting(cv);
   return s ? s.active : true; // no settings row yet = active by default
 }
 
@@ -1027,7 +1042,7 @@ async function saveLifetimeNet(cv){
   const el = document.getElementById('lt_'+cv);
   const val = parseFloat(el.value)||0;
   await api('saveSetting', {cv, lifetimeNet: val});
-  const s = SETTINGS.find(x=>x.cv===cv);
+  const s = findSetting(cv);
   if(s) s.lifetimeNet = val; else SETTINGS.push({cv, lifetimeNet: val, active:true});
   renderLeaderboard();
 }
@@ -1037,7 +1052,7 @@ async function saveLifetimeNet(cv){
 // (e.g. "Roy Compton") from inside the app. Saved to the app's own "Canvasser Settings" tab —
 // the Tracker tab is never touched.
 function aliasEditorHtml(cv){
-  const s = SETTINGS.find(x=>x.cv===cv);
+  const s = findSetting(cv);
   const current = parseAliases(s && s.aliases);
   const others = [...new Set(DATA.map(r=>r.cv))].filter(n=>n && n!==cv).sort((a,b)=>a.localeCompare(b));
   const chips = current.length
@@ -1045,6 +1060,7 @@ function aliasEditorHtml(cv){
     : '<span class="note" style="margin:0">None yet.</span>';
   return `<div style="border-top:1px solid var(--bd);padding-top:10px;margin:4px 0 10px">
     <div style="font-size:12.5px;color:var(--tx2);margin-bottom:6px">Other names for this person <span class="note" style="margin:0">(GroupMe / sign-up alias — their leads count here)</span></div>
+    ${aliasSaveWarning ? `<p style="margin:0 0 8px;font-size:12px;font-weight:600;color:var(--cxl)">${aliasSaveWarning}</p>` : ''}
     <div style="display:flex;flex-wrap:wrap;align-items:center;margin-bottom:6px">${chips}</div>
     ${others.length ? `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
       <select style="font-size:12.5px;max-width:220px"><option value="">Pick a name to merge in…</option>${others.map(n=>`<option value="${esc(n)}">${n}</option>`).join('')}</select>
@@ -1053,12 +1069,23 @@ function aliasEditorHtml(cv){
   </div>`;
 }
 
+let aliasSaveWarning = '';
 async function saveAliases(cv, list){
   const aliases = list.join(', ');
   const res = await api('saveSetting', {cv, aliases});
   if(res && res.ok===false){ alert('Could not save: '+(res.error||'error')); return; }
-  const s = SETTINGS.find(x=>x.cv===cv);
+  const s = findSetting(cv);
   if(s) s.aliases = aliases; else SETTINGS.push({cv, lifetimeNet:0, active:true, notes:'', aliases});
+  // Double-check it really landed in the Sheet (an old Code.gs replies "ok" but silently drops aliases).
+  aliasSaveWarning = '';
+  try{
+    const chk = await api('settings');
+    const row = chk && chk.ok && chk.settings.find(x=>nameKey(x.cv)===nameKey(cv));
+    const saved = row && row.aliases!==undefined ? parseAliases(row.aliases).map(nameKey).sort().join('|') : null;
+    if(saved !== list.map(nameKey).sort().join('|')){
+      aliasSaveWarning = 'NOT SAVED to the Sheet — this will undo on refresh. Apps Script is still running the old Code.gs: paste the new Code.gs, then Deploy → Manage deployments → pencil → New version → Deploy.';
+    }
+  }catch(e){ aliasSaveWarning = 'Could not confirm the save — check your connection and refresh.'; }
   canonicalizeCanvassers(DATA);
   expandedCanvasser = cv;
   setupViewAs();
@@ -1073,27 +1100,27 @@ async function addAlias(btn){
   if(!alias) return;
   btn.disabled = true; btn.textContent = 'Saving…';
   // Names already merged INTO the alias come along with it.
-  const aliasSetting = SETTINGS.find(x=>x.cv===alias);
+  const aliasSetting = findSetting(alias);
   const carried = parseAliases(aliasSetting && aliasSetting.aliases);
   // The raw spellings in the Sheet that currently show as this alias (e.g. different casing).
   const rawSpellings = [...new Set(DATA.filter(r=>r.cv===alias).map(r=>String(r._cvRaw||'').trim()).filter(Boolean))];
-  const s = SETTINGS.find(x=>x.cv===cv);
+  const s = findSetting(cv);
   const list = parseAliases(s && s.aliases);
-  [alias, ...rawSpellings, ...carried].forEach(a=>{ if(a.toLowerCase()!==cv.toLowerCase() && !list.some(x=>x.toLowerCase()===a.toLowerCase())) list.push(a); });
+  [alias, ...rawSpellings, ...carried].forEach(a=>{ if(nameKey(a)!==nameKey(cv) && !list.some(x=>nameKey(x)===nameKey(a))) list.push(a); });
   if(aliasSetting && carried.length) await api('saveSetting', {cv: alias, aliases: ''}).then(()=>{ aliasSetting.aliases=''; });
   await saveAliases(cv, list);
 }
 
 async function removeAlias(a){
   const cv = a.dataset.cv, alias = a.dataset.alias;
-  const s = SETTINGS.find(x=>x.cv===cv);
+  const s = findSetting(cv);
   const list = parseAliases(s && s.aliases).filter(x=>x!==alias);
   await saveAliases(cv, list);
 }
 
 async function toggleActive(cv, wasActive){
   await api('saveSetting', {cv, active: !wasActive});
-  const s = SETTINGS.find(x=>x.cv===cv);
+  const s = findSetting(cv);
   if(s) s.active = !wasActive; else SETTINGS.push({cv, lifetimeNet:0, active: !wasActive});
   expandedCanvasser = null;
   renderLeaderboard();
