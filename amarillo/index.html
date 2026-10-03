@@ -37,6 +37,9 @@ tbody tr:last-child td{border-bottom:none}tbody tr:hover{background:rgba(127,127
 .pill.pend{background:var(--pend-bg);color:var(--pend)}.pill.info{background:var(--info-bg);color:var(--info)}
 .pill.pur{background:var(--pur-bg);color:var(--pur)}
 .amt{font-weight:600}.amt.z{color:var(--mut);font-weight:400}
+tbody td.c-m{display:none}
+.mc1{display:flex;justify-content:space-between;align-items:center;gap:8px}.mc1 b{font-size:14px}
+.mc2,.mc3{font-size:12px;color:var(--tx2);margin-top:3px}
 .modal-bg{display:none;position:fixed;inset:0;background:rgba(10,14,20,.5);z-index:50;align-items:center;justify-content:center;padding:20px}
 .modal-bg.open{display:flex}
 .modal{background:var(--card);border-radius:12px;max-width:640px;width:100%;max-height:90vh;overflow:auto;padding:1.3rem}
@@ -62,8 +65,8 @@ details summary{cursor:pointer;font-size:13px;font-weight:600;color:var(--navy2)
 .setup{max-width:480px;margin:3rem auto;background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:1.4rem}
 @media(max-width:900px){.kpis{grid-template-columns:repeat(3,1fr)}.charts{grid-template-columns:1fr}.cbox{height:200px}
 table,thead,tbody,tr,td,th{display:block}thead{display:none}
-tbody tr{border:1px solid var(--bd);border-radius:10px;margin-bottom:8px;padding:8px 10px}
-tbody td{border:none;padding:3px 0}.grid2,.grid3{grid-template-columns:1fr}}
+tbody tr{border:1px solid var(--bd);border-radius:10px;margin-bottom:6px;padding:9px 12px}
+tbody td{display:none}tbody td.c-m{display:block;border:none;padding:0}.grid2,.grid3{grid-template-columns:1fr}}
 </style></head><body>
 
 <header><div class="hrow">
@@ -105,6 +108,18 @@ tbody td{border:none;padding:3px 0}.grid2,.grid3{grid-template-columns:1fr}}
   <input type="text" id="search" placeholder="Search name, address, city…" style="min-width:180px">
   <select id="fCanvasser"><option value="">All canvassers</option></select>
   <select id="fDisp"><option value="">All dispositions</option></select>
+  <select id="fSort" title="Sort leads">
+    <option value="new">Sort: Newest added</option>
+    <option value="d_desc">Sort: Entry date (new → old)</option>
+    <option value="d_asc">Sort: Entry date (old → new)</option>
+    <option value="appt_desc">Sort: Appointment (latest first)</option>
+    <option value="appt_asc">Sort: Appointment (earliest first)</option>
+    <option value="cu_asc">Sort: Customer A–Z</option>
+    <option value="cv_asc">Sort: Canvasser A–Z</option>
+    <option value="di_asc">Sort: Disposition</option>
+    <option value="am_desc">Sort: Gross $ (high → low)</option>
+    <option value="custom" hidden>Sort: by column</option>
+  </select>
   <div class="spacer"></div>
 </div>
 <div class="toolbar" style="margin-top:-6px">

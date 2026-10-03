@@ -49,7 +49,21 @@ function esc(s){ return (s==null?'':String(s)).replace(/"/g,'&quot;'); }
 function newId(){ return 'tmp'+Date.now().toString(36); }
 
 let DATA = [];
-let sort={k:'d',dir:'desc'};
+// Sort options for the "Sort" dropdown (works on phone + Mac). 'rowId' = position in the Sheet,
+// so "Newest added" always puts the most recently created lead first, whatever date is on the sheet.
+const SORT_OPTIONS = {
+  new:       {k:'rowId', dir:'desc'},
+  d_desc:    {k:'d',     dir:'desc'},
+  d_asc:     {k:'d',     dir:'asc'},
+  appt_desc: {k:'appt',  dir:'desc'},
+  appt_asc:  {k:'appt',  dir:'asc'},
+  cu_asc:    {k:'cu',    dir:'asc'},
+  cv_asc:    {k:'cv',    dir:'asc'},
+  di_asc:    {k:'di',    dir:'asc'},
+  am_desc:   {k:'am',    dir:'desc'},
+};
+let sortChoice = (function(){ try{ const v = localStorage.getItem('mw_sort'); return (v && SORT_OPTIONS[v]) ? v : 'new'; }catch(e){ return 'new'; } })();
+let sort = {...SORT_OPTIONS[sortChoice]};
 let charts={};
 let parseTargetId = null;
 let viewFilter = localStorage.getItem('mw_view_as') || '';
@@ -211,13 +225,50 @@ function renderCharts(rows){
 
 let tableLimit = 20;
 
+// Turns a date/time string into a sortable "yyyy-mm-dd HH:MM" key. Handles "2026-10-03",
+// "2026-10-03 @ 6:00 PM", "10/3/2026 6pm", "10/3 6:30 PM". Returns '' if no date is found.
+function dateSortKey(v, fallbackYear){
+  const s = (v==null?'':String(v));
+  let y, m, d;
+  let mt = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if(mt){ y=+mt[1]; m=+mt[2]; d=+mt[3]; }
+  else {
+    mt = s.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
+    if(!mt) return '';
+    m=+mt[1]; d=+mt[2];
+    y = mt[3] ? +mt[3] : (fallbackYear || new Date().getFullYear());
+    if(y<100) y+=2000;
+  }
+  let hh=0, mm=0;
+  const tm = s.match(/(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m/i);
+  if(tm){ hh=+tm[1]%12; mm=+(tm[2]||0); if(tm[3].toLowerCase()==='p') hh+=12; }
+  const p = n=>String(n).padStart(2,'0');
+  return y+'-'+p(m)+'-'+p(d)+' '+p(hh)+':'+p(mm);
+}
+
+function sortValue(r, k){
+  if(k==='rowId') return Number(r.rowId)||0;
+  if(k==='am') return Number(r.am)||0;
+  if(k==='d') return dateSortKey(r.d) || (r.d||'').toString();
+  if(k==='appt' || k==='sa' || k==='la'){
+    const yr = parseInt(String(r.d||'').slice(0,4)) || undefined;
+    const src = k==='appt' ? (r.la || r.sa) : r[k]; // "appt" = current appointment: LP date if rescheduled, else original
+    return dateSortKey(src, yr) || (src||'').toString();
+  }
+  return (r[k]==null?'':String(r[k])).toLowerCase();
+}
+
 function renderTable(allRows){
+  const numeric = sort.k==='rowId' || sort.k==='am';
   const rows = allRows.slice().sort((a,b)=>{
-    let x=a[sort.k], y=b[sort.k];
-    if(sort.k==='am'){ x=+x||0; y=+y||0; } else { x=(x||'').toString(); y=(y||'').toString(); }
+    const x = sortValue(a, sort.k), y = sortValue(b, sort.k);
+    if(!numeric){ // blanks always go to the bottom, whichever direction
+      if(x==='' && y!=='') return 1;
+      if(y==='' && x!=='') return -1;
+    }
     if(x<y) return sort.dir==='asc'?-1:1;
     if(x>y) return sort.dir==='asc'?1:-1;
-    return 0;
+    return (Number(b.rowId)||0) - (Number(a.rowId)||0); // tie → newest added first
   });
   const shown = tableLimit ? rows.slice(0, tableLimit) : rows;
   document.getElementById('rows').innerHTML = shown.map(r=>{
@@ -227,6 +278,11 @@ function renderTable(allRows){
       <td>${r.d}</td><td>${r.sa||'—'}</td><td>${laCell}</td><td>${r.cv}</td><td>${r.cu}</td><td>${r.ct}</td><td>${r.pr}</td>
       <td><span class="pill ${cls}">${r.di}</span></td><td>${r.sr}</td>
       <td class="amt ${r.am?'':'z'}">${r.am?fmtMoney(r.am):'—'}</td>
+      <td class="c-m">
+        <div class="mc1"><b>${r.cu||'—'}</b><span class="pill ${cls}">${r.di||'—'}</span></div>
+        <div class="mc2">${[r.ct, r.cv, r.d].filter(Boolean).join(' · ')}</div>
+        <div class="mc3">Appt ${r.sa||'—'}${r.la?` · LP <span style="color:var(--pur);font-weight:600">${r.la}</span>`:''}${r.am?` · <b style="color:var(--tx)">${fmtMoney(r.am)}</b>`:''}</div>
+      </td>
     </tr>`;
   }).join('');
   const note = document.getElementById('countNote');
@@ -300,10 +356,22 @@ document.getElementById('clearRangeBtn').addEventListener('click', ()=>{
   document.getElementById('fDateTo').value='';
   render();
 });
+const sortSel = document.getElementById('fSort');
+sortSel.value = sortChoice;
+sortSel.addEventListener('change', ()=>{
+  if(!SORT_OPTIONS[sortSel.value]) return;
+  sortChoice = sortSel.value;
+  sort = {...SORT_OPTIONS[sortChoice]};
+  try{ localStorage.setItem('mw_sort', sortChoice); }catch(e){}
+  renderTable(filtered());
+});
 document.querySelectorAll('thead th').forEach(th=>th.addEventListener('click',()=>{
   const k = th.dataset.k;
   sort.dir = (sort.k===k && sort.dir==='asc') ? 'desc' : 'asc';
-  sort.k = k; renderTable(filtered());
+  sort.k = k;
+  const match = Object.keys(SORT_OPTIONS).find(o=>SORT_OPTIONS[o].k===sort.k && SORT_OPTIONS[o].dir===sort.dir);
+  sortSel.value = match || 'custom'; // column-header clicks (Mac) show up in the dropdown too
+  renderTable(filtered());
 }));
 
 function chipRow(id, options, selected){
