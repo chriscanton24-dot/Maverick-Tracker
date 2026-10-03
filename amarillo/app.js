@@ -24,9 +24,9 @@ const DISP_STYLE = {
   'Data':'info','Called To Confirm':'info','Matched':'info',
   'Set':'pend','Pending':'pend','Unentered':'pend','Issue':'pend',
   'Unconfirmed':'pur','Demo No Sale':'pur','Demo (1-Leg)':'pur',
-  'Call To Cancel':'cxl','Customer Cancel at Door':'cxl'
+  'Call To Cancel':'cxl','Customer Cancel at Door':'cxl','Customer No Show':'cxl'
 };
-const DISP_OPTIONS = ['Data','Set','Unconfirmed','Called To Confirm','Cancelled','Call To Cancel','Customer Cancel at Door','Demo No Sale','Demo (1-Leg)','Sale','Sale (WIP)','Sale (Declined)','Pending','Unentered','Issue','Matched'];
+const DISP_OPTIONS = ['Data','Set','Unconfirmed','Called To Confirm','Cancelled','Call To Cancel','Customer Cancel at Door','Customer No Show','Demo No Sale','Demo (1-Leg)','Sale','Sale (WIP)','Sale (Declined)','Pending','Unentered','Issue','Matched'];
 
 // LeadPerfection short codes → the full names the app uses everywhere (leaderboard, KPIs, charts, pills).
 // Matching ignores upper/lower case and extra spaces. Unknown values are left exactly as they are.
@@ -40,6 +40,7 @@ const DISP_ALIASES = {
   'cxl':'Cancelled', 'cancel':'Cancelled', 'canceled':'Cancelled', 'cancelled':'Cancelled',
   'ctc':'Call To Cancel', 'call to cancel':'Call To Cancel',
   'ccd':'Customer Cancel at Door', 'customer cancel at door':'Customer Cancel at Door',
+  'cns':'Customer No Show', 'customer no show':'Customer No Show',
 };
 function normalizeDisp(di){
   if(di==null) return di;
@@ -57,6 +58,7 @@ function bucket(di){
   if(di==='Cancelled') return 'Cancelled';
   if(di==='Call To Cancel') return 'Call To Cancel';
   if(di==='Customer Cancel at Door') return 'Customer Cancel at Door';
+  if(di==='Customer No Show') return 'Customer No Show';
   if(di==='Demo No Sale') return 'Demo No Sale';
   if(di==='Pending'||di==='Unentered'||di==='Issue') return 'Pending / Unentered';
   if(di==='Unconfirmed') return 'Unconfirmed';
