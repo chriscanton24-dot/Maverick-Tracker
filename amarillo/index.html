@@ -67,6 +67,46 @@ details summary{cursor:pointer;font-size:13px;font-weight:600;color:var(--navy2)
 table,thead,tbody,tr,td,th{display:block}thead{display:none}
 tbody tr{border:1px solid var(--bd);border-radius:10px;margin-bottom:6px;padding:9px 12px}
 tbody td{display:none}tbody td.c-m{display:block;border:none;padding:0}.grid2,.grid3{grid-template-columns:1fr}}
+
+/* ----- Appointment calendar ----- */
+.cal-seg{display:inline-flex;border:1px solid var(--bd);border-radius:9px;overflow:hidden}
+.cal-seg button{border:0;border-right:1px solid var(--bd);background:var(--card);color:var(--tx2);padding:6px 14px;font-size:12.5px;cursor:pointer}
+.cal-seg button:last-child{border-right:0}.cal-seg button.on{background:var(--navy);color:#fff}
+.cal-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.cal-title{font-size:16px;font-weight:600;margin:12px 0 2px}.cal-sub{font-size:12px;color:var(--mut);margin-bottom:10px}
+.cal-strip{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:12px}
+.cal-stat{border:1px solid var(--bd);border-radius:9px;padding:7px 9px}.cal-stat .l{font-size:10.5px;color:var(--tx2)}.cal-stat .v{font-size:17px;font-weight:600}
+.cal-flag{display:inline-block;font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:6px;border:1px dashed currentColor;white-space:nowrap}
+.cal-appt{display:grid;grid-template-columns:74px 1fr auto;gap:10px;align-items:start;border:1px solid var(--bd);border-left:4px solid var(--bd);border-radius:9px;padding:9px 11px;margin-bottom:7px;cursor:pointer}
+.cal-appt:hover{background:rgba(127,127,127,.05)}
+.cal-appt .t{font-weight:700;font-size:13.5px}.cal-appt .t small{display:block;font-weight:400;color:var(--mut);font-size:10.5px}
+.cal-appt .c{font-weight:600;font-size:13.5px}.cal-appt .m{font-size:12px;color:var(--tx2);margin-top:2px}
+.cal-appt .r{text-align:right;display:flex;flex-direction:column;gap:4px;align-items:flex-end}
+.cal-appt .tel{display:inline-block;margin-top:4px;font-size:12.5px;font-weight:600;color:var(--info);text-decoration:none}
+.cal-appt.k-sale{border-left-color:var(--sale)}.cal-appt.k-cxl{border-left-color:var(--cxl)}.cal-appt.k-pend{border-left-color:var(--pend)}.cal-appt.k-info{border-left-color:var(--info)}.cal-appt.k-pur{border-left-color:var(--pur)}
+.cal-appt.k-cxl .c{text-decoration:line-through;text-decoration-color:var(--cxl)}
+.cal-week{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+.cal-wd{border:1px solid var(--bd);border-radius:9px;min-height:170px;padding:6px;cursor:pointer;min-width:0}
+.cal-wd.today,.cal-md.today{border:2px solid var(--info)}
+.cal-wd h4{margin:0 0 5px;font-size:11.5px;color:var(--tx2);display:flex;justify-content:space-between}
+.cal-chip{font-size:11px;font-weight:600;border-radius:6px;padding:3px 5px;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cal-chip.sale{background:var(--sale-bg);color:var(--sale)}.cal-chip.cxl{background:var(--cxl-bg);color:var(--cxl)}.cal-chip.pend{background:var(--pend-bg);color:var(--pend)}.cal-chip.info{background:var(--info-bg);color:var(--info)}.cal-chip.pur{background:var(--pur-bg);color:var(--pur)}
+.cal-month{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.cal-mh{font-size:10.5px;color:var(--mut);text-align:center;padding-bottom:2px}
+.cal-md{border:1px solid var(--bd);border-radius:8px;min-height:80px;padding:5px;cursor:pointer;font-size:11px;min-width:0}
+.cal-md.out{opacity:.35}
+.cal-md .n{font-weight:600;color:var(--tx2);display:flex;justify-content:space-between}
+.cal-dots{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px}.cal-dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+.cal-md .sum{margin-top:4px;color:var(--tx2)}
+.cal-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--tx2);margin-top:12px}
+.cal-legend span{display:inline-flex;align-items:center;gap:5px}
+.cal-empty{padding:22px;text-align:center;color:var(--mut);font-size:13px;border:1px dashed var(--bd);border-radius:9px}
+@media(max-width:760px){
+  .cal-strip{grid-template-columns:repeat(3,1fr)}
+  .cal-week{grid-template-columns:1fr}.cal-wd{min-height:0}
+  .cal-md{min-height:46px}.cal-md .sum{display:none}
+  .cal-appt{grid-template-columns:58px 1fr}.cal-appt .r{grid-column:2;flex-direction:row;flex-wrap:wrap;align-items:center;text-align:left}
+}
 </style></head><body>
 
 <header><div class="hrow">
@@ -94,6 +134,11 @@ tbody td{display:none}tbody td.c-m{display:block;border:none;padding:0}.grid2,.g
 <details id="leaderboardBox" style="margin-bottom:1rem">
   <summary style="font-size:14px">🏆 Canvasser Leaderboard — commissions, bonuses &amp; milestones</summary>
   <div id="leaderboardBody" style="margin-top:.8rem"></div>
+</details>
+
+<details id="calendarBox" open style="margin-bottom:1rem">
+  <summary style="font-size:14px">📅 Appointment Calendar — today, this week, history</summary>
+  <div id="calendarBody" style="margin-top:.8rem"></div>
 </details>
 
 <div class="kpis" id="kpis"></div>

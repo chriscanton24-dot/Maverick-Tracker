@@ -425,6 +425,8 @@ function render(){
   renderTable(rows);
   const lb = document.getElementById('leaderboardBox');
   if(lb && lb.open) renderLeaderboard();
+  const cb = document.getElementById('calendarBox');
+  if(cb && cb.open) renderCalendar();
 }
 
 document.getElementById('search').addEventListener('input', render);
@@ -1129,3 +1131,187 @@ async function toggleActive(cv, wasActive){
 document.getElementById('leaderboardBox').addEventListener('toggle', function(){
   if(this.open) renderLeaderboard();
 });
+
+
+// ===================== Appointment Calendar =====================
+// Reads the same leads as everything else (no Sheet / Code.gs changes).
+// Appointment date = LP / actual appt (la) if present — it reflects reschedules — otherwise the
+// lead sheet's Set appointment (sa). "Needs result" = appointment date passed but still Set /
+// Unconfirmed / Called To Confirm. "No rep" = today/upcoming, not cancelled, no sales rep.
+const CAL_OPEN = ['Set','Unconfirmed','Called To Confirm'];
+const CAL_SHORT = {'Demo No Sale':'DNS','Demo (1-Leg)':'1-Leg','Customer No Show':'CNS','Unconfirmed':'UnCon','Cancelled':'CXL','Call To Cancel':'CTC','Customer Cancel at Door':'CCD','Sale (Declined)':'Sale (Dcl)','Called To Confirm':'Conf'};
+let calView = 'day';
+let calCursor = calToday();
+let calFCv = '', calFSr = '', calFSt = '';
+
+function calToday(){ const n=new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate()); }
+function calYmd(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function calAdd(d,n){ const x=new Date(d); x.setDate(x.getDate()+n); return x; }
+function calWeekStart(d){ return calAdd(d, -d.getDay()); }
+function calH(v){ return (v==null?'':String(v)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function calHasTime(s){ return /(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m/i.test(String(s||'')); }
+function calTimeLabel(key){ const hh=+key.slice(11,13), mm=key.slice(14,16); const h12=hh%12||12; return h12+':'+mm+' '+(hh<12?'AM':'PM'); }
+function calShortDate(key){ const [y,m,d]=key.slice(0,10).split('-').map(Number); return new Date(y,m-1,d).toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
+
+function calAppointments(){
+  const out = [];
+  scopedData().forEach(r=>{
+    const src = r.la || r.sa; if(!src) return;
+    const yr = parseInt(String(r.d||'').slice(0,4)) || undefined;
+    const key = dateSortKey(src, yr); if(!key) return;
+    let moved = '';
+    if(r.la && r.sa){
+      const k2 = dateSortKey(r.sa, yr);
+      if(k2 && k2.slice(0,10)!==key.slice(0,10)) moved = calShortDate(k2);
+      else if(k2 && calHasTime(r.sa) && calHasTime(r.la) && k2!==key) moved = calTimeLabel(k2);
+    }
+    out.push({ r, key, date:key.slice(0,10), time: calHasTime(src) ? calTimeLabel(key) : 'Time TBD', moved });
+  });
+  return out;
+}
+function calKind(a){ return DISP_STYLE[a.r.di] || 'info'; } // color only
+// Grouping for counts/filters (by disposition, not color — Unconfirmed is purple but is NOT a demo).
+const CAL_CXL = ['Cancelled','Customer No Show','Call To Cancel','Customer Cancel at Door'];
+function calGroup(a){ const di=a.r.di||''; if(isSaleDisp(di)) return 'sale'; if(di==='Demo No Sale'||di==='Demo (1-Leg)') return 'demo'; if(CAL_CXL.includes(di)) return 'cxl'; return 'other'; }
+function calNeedsResult(a){ return a.date < calYmd(calToday()) && CAL_OPEN.includes(a.r.di); }
+function calNoRep(a){ const sr=(a.r.sr||'').trim(); return a.date >= calYmd(calToday()) && (!sr || sr.toLowerCase()==='unassigned') && calGroup(a)!=='cxl'; }
+
+function calFiltered(){
+  return calAppointments().filter(a=>{
+    if(calFCv && a.r.cv!==calFCv) return false;
+    if(calFSr && (a.r.sr||'')!==calFSr) return false;
+    const g = calGroup(a);
+    if(calFSt==='sale' && g!=='sale') return false;
+    if(calFSt==='demo' && g!=='demo') return false;
+    if(calFSt==='cxl' && g!=='cxl') return false;
+    if(calFSt==='open' && !CAL_OPEN.includes(a.r.di)) return false;
+    if(calFSt==='needs' && !calNeedsResult(a)) return false;
+    if(calFSt==='norep' && !calNoRep(a)) return false;
+    return true;
+  });
+}
+function calInRange(list, a, b){ return list.filter(x=>x.date>=a && x.date<=b).sort((x,y)=> x.key<y.key?-1:x.key>y.key?1:0); }
+
+function calStrip(list){
+  const c = g=> list.filter(a=>calGroup(a)===g).length;
+  const sold = list.filter(a=>calGroup(a)==='sale').reduce((s,a)=>s+(Number(a.r.am)||0),0);
+  const items = [['Appointments',list.length],['Sales',c('sale')+(sold?' · '+fmtMoney(sold):'')],['Demos (DNS / 1-leg)',c('demo')],
+    ['Cancels / no-shows',c('cxl')],['Still open',list.filter(a=>CAL_OPEN.includes(a.r.di)&&!calNeedsResult(a)).length],['⚠ Needs result',list.filter(calNeedsResult).length]];
+  return '<div class="cal-strip">'+items.map(([l,v])=>`<div class="cal-stat"><div class="l">${l}</div><div class="v">${v}</div></div>`).join('')+'</div>';
+}
+
+function calCard(a){
+  const r=a.r, k=calKind(a), sr=(r.sr||'').trim();
+  const digits = String(r.ph||'').replace(/\D/g,'');
+  const tel = digits.length>=10 ? `<a class="tel" href="tel:+1${digits.slice(-10)}" onclick="event.stopPropagation()">📞 ${calH(r.ph)}</a>` : (r.ph?`<div class="m">${calH(r.ph)}</div>`:'');
+  return `<div class="cal-appt k-${k}" onclick="openDetail('${r.rowId}')">
+    <div class="t">${a.time}${a.moved?`<small>↻ moved from ${a.moved}</small>`:''}</div>
+    <div><div class="c">${calH(r.cu)||'—'}</div>
+      <div class="m">${[r.ct, r.cv?('Canvasser: '+calH(r.cv)):'', 'Rep: '+(sr && sr.toLowerCase()!=='unassigned' ? calH(sr) : '<b style="color:var(--cxl)">none</b>')].filter(Boolean).join(' · ')}</div>
+      ${tel}</div>
+    <div class="r"><span class="pill ${k}">${calH(r.di)||'—'}</span>${Number(r.am)?`<b style="font-size:13px">${fmtMoney(r.am)}</b>`:''}
+      ${calNeedsResult(a)?'<span class="cal-flag" style="color:var(--pend)">⚠ Needs result</span>':''}${calNoRep(a)?'<span class="cal-flag" style="color:var(--cxl)">No rep</span>':''}</div>
+  </div>`;
+}
+
+const CAL_JUMPS = [
+  ['Today',      ()=>{ calView='day';   calCursor=calToday(); }],
+  ['Tomorrow',   ()=>{ calView='day';   calCursor=calAdd(calToday(),1); }],
+  ['Yesterday',  ()=>{ calView='day';   calCursor=calAdd(calToday(),-1); }],
+  ['This week',  ()=>{ calView='week';  calCursor=calToday(); }],
+  ['Next week',  ()=>{ calView='week';  calCursor=calAdd(calToday(),7); }],
+  ['Last week',  ()=>{ calView='week';  calCursor=calAdd(calToday(),-7); }],
+  ['2 weeks ago',()=>{ calView='week';  calCursor=calAdd(calToday(),-14); }],
+  ['3 weeks ago',()=>{ calView='week';  calCursor=calAdd(calToday(),-21); }],
+  ['Last month', ()=>{ const t=calToday(); calView='month'; calCursor=new Date(t.getFullYear(), t.getMonth()-1, 1); }],
+  ['⚠ Needs result', ()=>{ calFSt='needs'; calView='month'; calCursor=calToday(); }],
+];
+function calJump(i){ CAL_JUMPS[i][1](); renderCalendar(); }
+function calSetView(v){ calView=v; renderCalendar(); }
+function calShift(n){
+  if(calView==='day') calCursor=calAdd(calCursor,n);
+  else if(calView==='week') calCursor=calAdd(calCursor,7*n);
+  else calCursor=new Date(calCursor.getFullYear(), calCursor.getMonth()+n, 1);
+  renderCalendar();
+}
+function calOpenDay(y,m,d){ calView='day'; calCursor=new Date(y,m,d); renderCalendar(); }
+function calSetFilter(which, el){ if(which==='cv') calFCv=el.value; if(which==='sr') calFSr=el.value; if(which==='st') calFSt=el.value; renderCalendar(); }
+
+function renderCalendar(){
+  const box = document.getElementById('calendarBody'); if(!box) return;
+  const all = calAppointments();
+  if(viewFilter) calFCv = '';
+  const cvs = [...new Set(all.map(a=>a.r.cv).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  const srs = [...new Set(all.map(a=>(a.r.sr||'').trim()).filter(x=>x && x.toLowerCase()!=='unassigned'))].sort((a,b)=>a.localeCompare(b));
+  const opt = (v,l,cur)=>`<option value="${calH(v)}" ${v===cur?'selected':''}>${calH(l)}</option>`;
+  const stOpts = [['','All results'],['sale','Sales'],['demo','Demos (DNS / 1-leg)'],['cxl','Cancels / no-shows'],['open','Still open (Set / UnCon / Conf)'],['needs','⚠ Needs result'],['norep','⚠ No sales rep']];
+
+  const controls = `<div class="cal-row" style="justify-content:space-between">
+      <div class="cal-row">
+        <div class="cal-seg">${['day','week','month'].map(v=>`<button class="${calView===v?'on':''}" onclick="calSetView('${v}')">${v[0].toUpperCase()+v.slice(1)}</button>`).join('')}</div>
+        <button class="btn" onclick="calShift(-1)">&larr;</button><button class="btn" onclick="calShift(1)">&rarr;</button>
+      </div>
+      <div class="cal-row">
+        ${viewFilter ? '' : `<select onchange="calSetFilter('cv',this)">${opt('','All canvassers',calFCv)}${cvs.map(c=>opt(c,c,calFCv)).join('')}</select>`}
+        <select onchange="calSetFilter('sr',this)">${opt('','All sales reps',calFSr)}${srs.map(c=>opt(c,c,calFSr)).join('')}</select>
+        <select onchange="calSetFilter('st',this)">${stOpts.map(([v,l])=>opt(v,l,calFSt)).join('')}</select>
+      </div>
+    </div>
+    <div class="cal-row" style="margin-top:8px">${CAL_JUMPS.map((j,i)=>`<button class="btn sm" onclick="calJump(${i})">${j[0]}</button>`).join('')}</div>`;
+
+  const list = calFiltered(), today = calToday(), todayKey = calYmd(today);
+  let title='', sub='', strip='', body='';
+  if(calView==='day'){
+    const k = calYmd(calCursor), items = calInRange(list,k,k);
+    const diff = Math.round((calCursor - today)/864e5);
+    const rel = diff===0?'Today':diff===1?'Tomorrow':diff===-1?'Yesterday':diff<0?`${-diff} days ago`:`in ${diff} days`;
+    title = calCursor.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'})+' — '+rel;
+    sub = 'Sorted by appointment time. Tap an appointment to open the lead; tap the phone number to call.';
+    strip = calStrip(items);
+    body = items.length ? items.map(calCard).join('') : '<div class="cal-empty">No appointments on this day.</div>';
+  } else if(calView==='week'){
+    const ws = calWeekStart(calCursor), we = calAdd(ws,6), items = calInRange(list, calYmd(ws), calYmd(we));
+    title = 'Week of '+ws.toLocaleDateString('en-US',{month:'short',day:'numeric'})+' – '+we.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+    sub = 'Tap a day to see its full list.';
+    strip = calStrip(items);
+    body = '<div class="cal-week">'+[...Array(7)].map((_,i)=>{
+      const d = calAdd(ws,i), k = calYmd(d), di = items.filter(a=>a.date===k);
+      return `<div class="cal-wd ${k===todayKey?'today':''}" onclick="calOpenDay(${d.getFullYear()},${d.getMonth()},${d.getDate()})">
+        <h4><span>${d.toLocaleDateString('en-US',{weekday:'short',month:'numeric',day:'numeric'})}</span><span>${di.length||''}</span></h4>
+        ${di.map(a=>{ const last = String(a.r.cu||'').split(/[ ,]+/).filter(Boolean)[0]||'—'; // first name keeps chips short
+          return `<div class="cal-chip ${calKind(a)}" title="${calH(a.r.cu)} — ${calH(a.r.di)}">${calNeedsResult(a)?'⚠ ':''}${a.time.replace(':00','').replace('Time TBD','TBD')} ${calH(last)} · ${calH(CAL_SHORT[a.r.di]||a.r.di||'—')}</div>`; }).join('') || '<div style="font-size:11px;color:var(--mut)">—</div>'}
+      </div>`; }).join('')+'</div>';
+  } else {
+    const first = new Date(calCursor.getFullYear(), calCursor.getMonth(), 1), last = new Date(calCursor.getFullYear(), calCursor.getMonth()+1, 0), gs = calWeekStart(first);
+    const items = calInRange(list, calYmd(first), calYmd(last));
+    title = first.toLocaleDateString('en-US',{month:'long',year:'numeric'});
+    sub = 'Each dot is one appointment, colored by result. Tap a day to open it.';
+    strip = calStrip(items);
+    body = '<div class="cal-month">'+['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d=>`<div class="cal-mh">${d}</div>`).join('');
+    for(let i=0;i<42;i++){
+      const d = calAdd(gs,i), k = calYmd(d), out = d.getMonth()!==first.getMonth();
+      if(i>=35 && out) break;
+      const di = calInRange(list,k,k), sales = di.filter(a=>calGroup(a)==='sale').length;
+      body += `<div class="cal-md ${out?'out':''} ${k===todayKey?'today':''}" onclick="calOpenDay(${d.getFullYear()},${d.getMonth()},${d.getDate()})">
+        <div class="n"><span>${d.getDate()}</span>${di.some(calNeedsResult)?'<span style="color:var(--pend)">⚠</span>':''}</div>
+        <div class="cal-dots">${di.map(a=>`<i class="cal-dot" style="background:var(--${calKind(a)})"></i>`).join('')}</div>
+        ${di.length?`<div class="sum">${di.length} appt${di.length>1?'s':''}${sales?` · ${sales} sold`:''}</div>`:''}
+      </div>`;
+    }
+    body += '</div>';
+  }
+
+  const legend = `<div class="cal-legend">
+    <span><i class="cal-dot" style="background:var(--sale)"></i>Sale</span>
+    <span><i class="cal-dot" style="background:var(--pur)"></i>Demo No Sale / 1-Leg / UnCon</span>
+    <span><i class="cal-dot" style="background:var(--cxl)"></i>Cancelled / CNS / CTC / CCD</span>
+    <span><i class="cal-dot" style="background:var(--pend)"></i>Set / Pending</span>
+    <span><i class="cal-dot" style="background:var(--info)"></i>Data / Called to confirm / other</span>
+    <span><span class="cal-flag" style="color:var(--pend)">⚠ Needs result</span> appointment passed, still Set / UnCon / Conf</span>
+    <span><span class="cal-flag" style="color:var(--cxl)">No rep</span> upcoming appointment without a sales rep</span>
+  </div>`;
+
+  box.innerHTML = controls + `<div class="cal-title">${title}</div><div class="cal-sub">${sub}</div>` + strip + body + legend;
+}
+
+document.getElementById('calendarBox').addEventListener('toggle', function(){ if(this.open) renderCalendar(); });
