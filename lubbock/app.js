@@ -92,16 +92,44 @@ let charts={};
 let parseTargetId = null;
 let viewFilter = localStorage.getItem('mw_view_as') || '';
 
+// ----- Team password -----
+// Entered once per phone/computer, kept only in this browser (per territory). Sent with every request;
+// the Apps Script backend refuses anything without the right password.
+const KEY_STORE = 'mw_key:' + location.pathname;
+function getKey(){ try{ return localStorage.getItem(KEY_STORE) || ''; }catch(e){ return ''; } }
+function setKey(v){ try{ v ? localStorage.setItem(KEY_STORE, v) : localStorage.removeItem(KEY_STORE); }catch(e){} }
+function showLock(msg){
+  document.getElementById('mainApp').style.display='none';
+  document.getElementById('setupScreen').style.display='none';
+  document.getElementById('lockScreen').style.display='block';
+  const m = document.getElementById('lockMsg'); m.textContent = msg||''; m.style.display = msg ? 'block' : 'none';
+  document.getElementById('syncBadge').textContent = 'Locked';
+  const inp = document.getElementById('lockInput'); inp.value=''; setTimeout(()=>inp.focus(), 50);
+}
+function submitPassword(){
+  const v = document.getElementById('lockInput').value.trim();
+  if(!v) return;
+  setKey(v);
+  document.getElementById('lockScreen').style.display='none';
+  loadData();
+}
+function lockApp(){
+  setKey('');
+  DATA = []; SETTINGS = [];
+  document.querySelectorAll('.modal-bg.open').forEach(m=>m.classList.remove('open'));
+  showLock('Locked. Enter the team password to open the tracker again.');
+}
+document.getElementById('lockInput').addEventListener('keydown', e=>{ if(e.key==='Enter') submitPassword(); });
+
 async function api(action, payload){
   const url = getApiUrl();
-  if(action==='list' || action==='settings'){
-    const r = await fetch(url+'?action='+action);
-    return r.json();
-  }
   if(action==='update' && payload && payload.fields) payload = {...payload, fields: restoreOriginalNames(payload.fields)};
   if(action==='saveSetting' && payload && payload.cv) payload = {...payload, cv: settingCv(payload.cv)};
-  const r = await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify({action, ...payload}) });
-  return r.json();
+  const r = await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify({action, ...payload, key: getKey()}) });
+  const res = await r.json();
+  if(res && res.ok===false && res.error==='unauthorized'){ setKey(''); showLock('Wrong or changed password — please enter the team password.'); throw new Error('unauthorized'); }
+  if(res && res.ok===false && /APP_PASSWORD not set/.test(res.error||'')){ showLock('The backend has no team password set yet (APP_PASSWORD in Apps Script → Project Settings → Script Properties).'); throw new Error(res.error); }
+  return res;
 }
 
 // The Sheet is never rewritten just because the app displays a cleaner name/disposition:
@@ -169,12 +197,14 @@ function canonicalizeCanvassers(rows){
 
 async function loadData(){
   if(!getApiUrl()){ showSetup(); return; }
+  if(!getKey()){ showLock(''); return; }
   const badge = document.getElementById('syncBadge');
   badge.textContent = 'Syncing…';
   try{
     const res = await api('list');
     if(!res.ok) throw new Error(res.error||'load failed');
-    DATA = res.rows;
+    // Rows marked "Duplicate Of" (merged into another lead) stay in the Sheet but are hidden everywhere in the app.
+    DATA = res.rows.filter(r=>!(r.dupOf && String(r.dupOf).trim()));
     // Settings first now, because canvasser aliases live there and are needed before merging names.
     try{ const sres = await api('settings'); if(sres.ok) SETTINGS = sres.settings; }catch(e){ console.error(e); }
     canonicalizeCanvassers(DATA);
@@ -184,6 +214,7 @@ async function loadData(){
     setupViewAs();
     render();
   }catch(err){
+    if(err && (err.message==='unauthorized' || /APP_PASSWORD/.test(err.message||''))) return; // lock screen already shown
     badge.textContent = 'Sync error — tap to retry';
     console.error(err);
   }
@@ -502,7 +533,8 @@ function openDetail(id){
     <div style="display:flex;gap:8px;margin-top:6px">
       <button class="btn primary" style="flex:1" onclick="openEdit('${id}')">Update manually</button>
       <button class="btn primary" style="flex:1" onclick="openParse('${id}')">Update from screenshot</button>
-    </div>`;
+    </div>
+    <button class="btn sm" style="width:100%;margin-top:8px" onclick="openMerge('${id}')">Duplicate? Merge this lead into another lead…</button>`;
   document.getElementById('detailModal').classList.add('open');
 }
 
@@ -626,7 +658,7 @@ function openAdd(){
 document.getElementById('addBtn').addEventListener('click', openAdd);
 document.getElementById('addModal').addEventListener('click',e=>{ if(e.target.id==='addModal') e.target.classList.remove('open'); });
 
-async function saveNewEntry(){
+async function saveNewEntry(force){
   const fields = { d:document.getElementById('f_d').value, cv:document.getElementById('f_cv').value||'Unassigned',
     lt:document.getElementById('f_lt').value, cu:document.getElementById('f_cu').value, ph:document.getElementById('f_ph').value,
     ad:document.getElementById('f_ad').value, ct:document.getElementById('f_ct').value,
@@ -634,19 +666,29 @@ async function saveNewEntry(){
     di:document.getElementById('f_di').value, am:parseFloat(document.getElementById('f_am').value)||0,
     netAm: document.getElementById('f_netAm').value==='' ? '' : (parseFloat(document.getElementById('f_netAm').value)||0),
     gm:true, il:true, no:document.getElementById('f_no').value, calls:[], notesLog:[] };
+  if(!force){
+    const matches = findPossibleDuplicates(fields);
+    if(matches.length){ renderAddDupeWarning(matches); return; }
+  }
   const res = await api('add', {fields});
   if(res.ok){ document.getElementById('addModal').classList.remove('open'); loadData(); }
 }
 
-document.getElementById('exportBtn').addEventListener('click', ()=>{
-  const rows = filtered();
-  const headers = ['Date','Canvasser','Lead Type','LP ID','Customer','Phone','Address','City','Sales Rep','Product','Disposition','Gross Amount','Net Amount','In GroupMe','In LP','Notes'];
-  const lines = [headers.join(',')].concat(rows.map(r=>[r.d,r.cv,r.lt,r.lp,r.cu,r.ph,r.ad,r.ct,r.sr,r.pr,r.di,r.am,r.netAm,r.gm,r.il,r.no]
-    .map(v=>`"${(v??'').toString().replace(/"/g,'""')}"`).join(',')));
-  const csv = lines.join(String.fromCharCode(10));
-  const blob=new Blob([csv],{type:'text/csv'}); const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob); a.download='maverick_tracker_export.csv'; a.click();
-});
+function renderAddDupeWarning(matches){
+  let box = document.getElementById('addDupeWarning');
+  if(!box){ document.getElementById('addBody').insertAdjacentHTML('beforeend','<div id="addDupeWarning"></div>'); box = document.getElementById('addDupeWarning'); }
+  box.innerHTML = `<div style="margin-top:10px;background:var(--pend-bg);border:1px solid var(--pend);border-radius:10px;padding:10px 12px">
+    <p style="margin:0 0 8px;font-size:13px;font-weight:600;color:var(--pend)">This might already be a lead — found ${matches.length>1?matches.length+' matches':'a match'}:</p>
+    ${dupeListHtml(matches)}
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn sm primary" style="flex:1" onclick="document.getElementById('addModal').classList.remove('open'); openDetail('${matches[0].rowId}')">Open ${esc(matches[0].cu)} instead</button>
+      <button class="btn sm" style="flex:1" onclick="saveNewEntry(true)">Create as new lead anyway</button>
+    </div>
+  </div>`;
+  box.scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+// (CSV export removed on purpose — customer data can only be exported by the owner, directly from the Google Sheet.)
 
 // ---------- Parse a screenshot (via Gemini, proxied through Apps Script) ----------
 let parseAccumulated = null;
@@ -795,26 +837,59 @@ function renderParsePreview(parsed, log){
     <div id="dupeWarning"></div>`;
 }
 
-function normPhone(p){ return (p||'').replace(/\D/g,'').slice(-10); }
-function normAddr(a){ return (a||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
+function normPhone(p){ const d=(p||'').replace(/\D/g,''); return d.length>=10 ? d.slice(-10) : ''; }
 
-function findPossibleDuplicates(address, phone){
-  const addr = normAddr(address);
-  const ph = normPhone(phone);
+// Address → standard form so "4409 Southwest 1st Avenue" = "4409 sw 1st ave" = "4409 SW 1st Ave."
+const ADDR_WORDS = {north:'n',south:'s',east:'e',west:'w',northeast:'ne',northwest:'nw',southeast:'se',southwest:'sw',
+  street:'st',avenue:'ave',av:'ave',road:'rd',drive:'dr',lane:'ln',boulevard:'blvd',court:'ct',circle:'cir',place:'pl',
+  parkway:'pkwy',highway:'hwy',terrace:'ter',trail:'trl',square:'sq',way:'wy',
+  first:'1st',second:'2nd',third:'3rd',fourth:'4th',fifth:'5th',sixth:'6th',seventh:'7th',eighth:'8th',ninth:'9th',tenth:'10th'};
+function addrTokens(a){
+  return String(a||'').toLowerCase().replace(/[^a-z0-9 ]+/g,' ').split(/\s+/).filter(Boolean).map(w=>ADDR_WORDS[w]||w);
+}
+function sameAddress(a, b){
+  const x = addrTokens(a), y = addrTokens(b);
+  if(x.length<2 || y.length<2) return false;
+  if(!/^\d/.test(x[0]) || x[0]!==y[0]) return false;           // house number must match
+  const n = Math.min(x.length, y.length, 4);                     // compare the street core, ignore trailing city/zip/unit
+  for(let i=0;i<n;i++) if(x[i]!==y[i]) return false;
+  return true;
+}
+
+// Customer name → set of name words, any order ("Lomeli, Isaiah" = "Isaiah Lomeli"; "Salvador & Frida Veleta" ⊃ "Veleta, Salvador")
+const NAME_SKIP = new Set(['and','mr','mrs','ms','jr','sr','ii','iii','the','cad']);
+function nameTokens(n){ return [...new Set(String(n||'').toLowerCase().replace(/[^a-z ]+/g,' ').split(/\s+/).filter(w=>w.length>1 && !NAME_SKIP.has(w)))]; }
+function sameName(a, b){
+  const x = nameTokens(a), y = new Set(nameTokens(b));
+  if(x.length<2 || y.size<2) return false;
+  return x.filter(w=>y.has(w)).length >= 2;                       // at least first + last name in common
+}
+
+// Checks a new/edited lead against every existing lead. Returns matches with the reasons found.
+function findPossibleDuplicates(f, excludeRowId){
+  f = f || {};
+  const ph = normPhone(f.ph), lp = String(f.lp||'').replace(/\D/g,'');
   const matches = [];
   DATA.forEach(r=>{
-    const addrHit = addr && normAddr(r.ad) === addr;
-    const phoneHit = ph && normPhone(r.ph) === ph;
-    if(addrHit || phoneHit) matches.push({...r, _why: addrHit ? 'Same address' : 'Same phone number'});
+    if(excludeRowId!=null && String(r.rowId)===String(excludeRowId)) return;
+    const why = [];
+    if(lp && String(r.lp||'').replace(/\D/g,'')===lp) why.push('Same Prospect ID');
+    if(f.ad && sameAddress(f.ad, r.ad)) why.push('Same address');
+    if(ph && (normPhone(r.ph)===ph || normPhone(r.ph2)===ph)) why.push('Same phone number');
+    if(f.cu && sameName(f.cu, r.cu)) why.push('Same customer name');
+    if(why.length) matches.push({...r, _why: why.join(' · '), _score: why.length});
   });
-  return matches;
+  return matches.sort((a,b)=>b._score-a._score);
+}
+function dupeListHtml(matches){
+  return matches.slice(0,5).map(m=>`<div class="logitem" style="margin-bottom:6px"><b>${esc(m.cu)}</b> — <span style="color:var(--pend)">${esc(m._why)}</span><div class="meta">${esc(m.ad)}${m.ct?', '+esc(m.ct):''} · ${esc(m.ph)} · LP ${esc(m.lp||'—')} · ${esc(m.d)} · ${esc(m.di)}</div></div>`).join('');
 }
 
 function renderDupeWarning(matches){
   const box = document.getElementById('dupeWarning');
   box.innerHTML = `<div style="margin-top:10px;background:var(--pend-bg);border:1px solid var(--pend);border-radius:10px;padding:10px 12px">
     <p style="margin:0 0 8px;font-size:13px;font-weight:600;color:var(--pend)">This might already be a lead — found a match:</p>
-    ${matches.map(m=>`<div class="logitem" style="margin-bottom:6px"><b>${esc(m.cu)}</b> — <span style="color:var(--pend)">${esc(m._why)}</span><div class="meta">${esc(m.ad)}, ${esc(m.ct)} · ${esc(m.ph)} · ${esc(m.d)} · ${esc(m.di)}</div></div>`).join('')}
+    ${dupeListHtml(matches)}
     <div style="display:flex;gap:8px;margin-top:8px">
       <button class="btn sm primary" style="flex:1" onclick="parseTargetId='${matches[0].rowId}'; confirmParse(true)">Update ${esc(matches[0].cu)} instead</button>
       <button class="btn sm" style="flex:1" onclick="confirmParse(true)">Create as new lead anyway</button>
@@ -839,7 +914,7 @@ async function confirmParse(force){
   if(edited.netAm) edited.netAm = parseFloat(edited.netAm)||0;
 
   if(!parseTargetId && !force){
-    const matches = findPossibleDuplicates(edited.ad || parsed.ad, edited.ph || parsed.ph);
+    const matches = findPossibleDuplicates({ad: edited.ad || parsed.ad, ph: edited.ph || parsed.ph, cu: edited.cu || parsed.cu, lp: edited.lp || parsed.lp});
     if(matches.length){ renderDupeWarning(matches); return; }
   }
 
@@ -1315,3 +1390,84 @@ function renderCalendar(){
 }
 
 document.getElementById('calendarBox').addEventListener('toggle', function(){ if(this.open) renderCalendar(); });
+
+
+// ===================== Merge duplicate leads =====================
+// From a lead's detail: pick the lead to KEEP. Anything missing on the kept lead is copied from this one,
+// call & note logs are combined, then THIS lead's row is marked "Duplicate Of: …" in the Sheet and hidden
+// in the app. Nothing is deleted, so no rows shift and it can be undone by clearing that cell in the Sheet.
+function mergeEmpty(v){ return v==null || v==='' || (Array.isArray(v) && !v.length); }
+
+function openMerge(id){
+  const r = findRow(id); if(!r) return;
+  const suggestions = findPossibleDuplicates(r, r.rowId);
+  document.getElementById('detailBody').innerHTML = `<button class="modal-close" onclick="document.getElementById('detailModal').classList.remove('open')">&times;</button>
+    <h2>Merge ${esc(r.cu)} into another lead</h2>
+    <p class="note" style="margin:4px 0 12px">Pick the lead to <b>keep</b>. This lead (${esc(r.cu)} · ${esc(r.ad)} · LP ${esc(r.lp||'—')}) will be marked as a duplicate and hidden. Nothing is deleted.</p>
+    ${suggestions.length ? `<p style="font-size:12.5px;font-weight:600;margin:0 0 6px">Likely matches</p>
+      ${suggestions.slice(0,6).map(m=>mergeCandidateHtml(id,m,m._why)).join('')}` : '<p class="note" style="margin:0 0 8px">No likely matches found automatically — search below.</p>'}
+    <div class="field" style="margin-top:10px"><label>Or search any lead (name, address, phone, LP)</label>
+      <input type="text" id="mergeSearch" placeholder="Type at least 2 letters…"></div>
+    <div id="mergeResults"></div>
+    <div style="display:flex;gap:8px;margin-top:10px"><button class="btn" style="flex:1" onclick="openDetail('${id}')">Cancel</button></div>`;
+  document.getElementById('mergeSearch').addEventListener('input', e=>{
+    const q = e.target.value.trim().toLowerCase();
+    const box = document.getElementById('mergeResults');
+    if(q.length<2){ box.innerHTML=''; return; }
+    const qd = q.replace(/\D/g,'');
+    const hits = DATA.filter(x=>String(x.rowId)!==String(id) && (
+      `${x.cu} ${x.ad} ${x.ct}`.toLowerCase().includes(q) || (qd.length>=3 && (String(x.ph||'').replace(/\D/g,'').includes(qd) || String(x.lp||'').includes(qd)))
+    )).slice(0,10);
+    box.innerHTML = hits.length ? hits.map(m=>mergeCandidateHtml(id,m,'')).join('') : '<p class="note">No leads found.</p>';
+  });
+}
+
+function mergeCandidateHtml(dupId, m, why){
+  return `<div class="logitem" style="cursor:pointer" onclick="confirmMerge('${dupId}','${m.rowId}')">
+    <b>${esc(m.cu)}</b>${why?` — <span style="color:var(--pend)">${esc(why)}</span>`:''}
+    <div class="meta">${esc(m.ad)}${m.ct?', '+esc(m.ct):''} · ${esc(m.ph)} · LP ${esc(m.lp||'—')} · ${esc(m.d)} · ${esc(m.di)} · ${esc(m.cv)}</div></div>`;
+}
+
+function buildMerged(keep, dup){
+  const merged = {...keep};
+  Object.keys(dup).forEach(k=>{
+    if(k==='rowId' || k.startsWith('_') || k==='calls' || k==='notesLog' || k==='dupOf') return;
+    if(k==='gm' || k==='il'){ merged[k] = !!(keep[k] || dup[k]); return; }
+    if(Array.isArray(dup[k]) && Array.isArray(keep[k])){ merged[k] = [...new Set([...keep[k], ...dup[k]])]; return; }
+    if(mergeEmpty(keep[k]) && !mergeEmpty(dup[k])) merged[k] = dup[k];
+  });
+  merged.calls = mergeLog(keep.calls, dup.calls);
+  merged.notesLog = mergeLog(keep.notesLog, dup.notesLog);
+  return merged;
+}
+
+function confirmMerge(dupId, keepId){
+  const dup = findRow(dupId), keep = findRow(keepId); if(!dup || !keep) return;
+  const merged = buildMerged(keep, dup);
+  const filled = Object.keys(merged).filter(k=>!k.startsWith('_') && k!=='calls' && k!=='notesLog' && FIELD_LABELS[k] && mergeEmpty(keep[k]) && !mergeEmpty(merged[k]));
+  const newCalls = merged.calls.length - (keep.calls||[]).length, newNotes = merged.notesLog.length - (keep.notesLog||[]).length;
+  document.getElementById('detailBody').innerHTML = `<button class="modal-close" onclick="document.getElementById('detailModal').classList.remove('open')">&times;</button>
+    <h2>Confirm merge</h2>
+    <div class="logitem" style="border-color:var(--sale)"><b style="color:var(--sale)">KEEP:</b> ${esc(keep.cu)}<div class="meta">${esc(keep.ad)} · ${esc(keep.ph)} · LP ${esc(keep.lp||'—')} · ${esc(keep.di)}</div></div>
+    <div class="logitem" style="border-color:var(--cxl)"><b style="color:var(--cxl)">MARK AS DUPLICATE &amp; HIDE:</b> ${esc(dup.cu)}<div class="meta">${esc(dup.ad)} · ${esc(dup.ph)} · LP ${esc(dup.lp||'—')} · ${esc(dup.di)}</div></div>
+    <p style="font-size:12.5px;margin:10px 0 4px"><b>Copied onto the kept lead</b> (only where it's blank):</p>
+    <p class="note" style="margin:0 0 6px">${filled.length ? filled.map(k=>esc(FIELD_LABELS[k])+': '+esc(Array.isArray(merged[k])?merged[k].join(', '):merged[k])).join(' · ') : 'Nothing — the kept lead already has every field.'}</p>
+    <p class="note" style="margin:0 0 10px">Call log: +${newCalls} · Notes: +${newNotes}. The kept lead's existing values are never overwritten.</p>
+    <div style="display:flex;gap:8px">
+      <button class="btn" style="flex:1" onclick="openMerge('${dupId}')">Back</button>
+      <button class="btn primary" style="flex:1" id="doMergeBtn" onclick="doMerge('${dupId}','${keepId}')">Yes, merge</button>
+    </div>`;
+}
+
+async function doMerge(dupId, keepId){
+  const dup = findRow(dupId), keep = findRow(keepId); if(!dup || !keep) return;
+  const btn = document.getElementById('doMergeBtn'); if(btn){ btn.disabled = true; btn.textContent = 'Merging…'; }
+  const merged = buildMerged(keep, dup);
+  const r1 = await api('update', {rowId: keep.rowId, fields: merged});
+  if(!r1 || !r1.ok){ alert('Merge failed while updating the kept lead — nothing was hidden.'); if(btn){ btn.disabled=false; btn.textContent='Yes, merge'; } return; }
+  const label = `Row ${keep.rowId} — ${keep.cu||''}${keep.lp?' (LP '+keep.lp+')':''}`;
+  const r2 = await api('update', {rowId: dup.rowId, fields: {...dup, dupOf: label}});
+  if(!r2 || !r2.ok){ alert('The kept lead was updated, but marking the duplicate failed. Please try the merge again.'); }
+  await loadData();
+  openDetail(keepId);
+}
