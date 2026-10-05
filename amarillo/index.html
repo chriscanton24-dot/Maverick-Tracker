@@ -113,9 +113,18 @@ tbody td{display:none}tbody td.c-m{display:block;border:none;padding:0}.grid2,.g
 <div><h1 id="pageTitle">Maverick Windows — Sales Tracker</h1><p class="sub">Canvassing &amp; sales pipeline · live Google Sheet</p></div>
 <div style="display:flex;gap:8px;align-items:center">
   <div class="sync" id="syncBadge" onclick="loadData()">Loading…</div>
+  <button class="btn sm" onclick="lockApp()" title="Lock this device — the password will be needed again" style="background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff">🔒 Lock</button>
   <button class="btn sm" onclick="changeApiUrl()" style="background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff">Change URL</button>
 </div>
 </div></header>
+
+<div id="lockScreen" style="display:none"><div class="setup">
+  <h2 style="margin:0 0 8px;font-size:16px">🔒 Team password</h2>
+  <p style="font-size:12.5px;color:var(--tx2);margin:0 0 8px">Enter the team password to open the tracker. You only need to do this once on this device.</p>
+  <p id="lockMsg" style="display:none;font-size:12.5px;font-weight:600;color:var(--cxl);margin:0 0 8px"></p>
+  <input type="password" id="lockInput" autocomplete="current-password" placeholder="Team password" style="width:100%;padding:9px;border-radius:8px;border:1px solid var(--bd);margin:0 0 8px;background:var(--card);color:var(--tx);font-size:14px">
+  <button class="btn primary" style="width:100%" onclick="submitPassword()">Unlock</button>
+</div></div>
 
 <div id="setupScreen" style="display:none"><div class="setup">
   <h2 style="margin:0 0 8px;font-size:16px">One-time setup</h2>
@@ -174,7 +183,6 @@ tbody td{display:none}tbody td.c-m{display:block;border:none;padding:0}.grid2,.g
   <input type="date" id="fDateTo">
   <button class="btn sm" id="clearRangeBtn">Clear range</button>
   <div class="spacer"></div>
-  <button class="btn" id="exportBtn">Export CSV</button>
   <button class="btn primary" id="parseBtn">+ New lead (upload screenshot)</button>
   <button class="btn primary" id="addBtn">+ Add entry</button>
 </div>
