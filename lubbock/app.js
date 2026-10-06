@@ -292,9 +292,73 @@ function netAmountFor(r){
   return isNetSaleDisp(r.di) ? (r.am||0) : 0;
 }
 
+// ===================== Result history (when each demo / sale actually happened) =====================
+// Commission, bonus, team goal and revenue count a result in the period it HAPPENED, not the entry date:
+//  • a DNS / 1-Leg / Sale counts on the date of the appointment that ran (LP/actual appt, else Set appt);
+//  • a lead that was DNS and is later Sold keeps BOTH: the DNS in its period and the Sale in the period it sold.
+// Each change of result is remembered as a hidden entry in the lead's existing Notes Log (cat "_result"),
+// so no new Sheet column / Apps Script change is needed. Leads without history use their current result.
+function resultGroup(di){ const d = normalizeDisp(di); if(isSaleDisp(d)) return 'sale'; if(d==='Demo No Sale') return 'dns'; if(d==='Demo (1-Leg)') return 'leg'; return null; }
+function localToday(){ const n=new Date(); return n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0')+'-'+String(n.getDate()).padStart(2,'0'); }
+function apptDay(r){ const yr = parseInt(String(r.d||'').slice(0,4)) || undefined; const k = dateSortKey(r.la || r.sa, yr); return k ? k.slice(0,10) : ''; }
+function isResultEntry(n){ return n && n.cat==='_result'; }
+function visibleNotes(r){ return (r.notesLog||[]).filter(n=>!isResultEntry(n)); }
+
+function resultEvents(r){
+  const stored = (r.notesLog||[]).filter(isResultEntry).map(n=>({g:n.g||resultGroup(n.text), di:n.text, date:String(n.entered||'').slice(0,10)})).filter(e=>e.g && e.date);
+  const cur = resultGroup(r.di);
+  if(!stored.length){ // no history yet → current result, dated by the appointment that ran
+    return cur ? [{g:cur, di:r.di, date: apptDay(r) || String(r.d||'').slice(0,10)}] : [];
+  }
+  const last = stored[stored.length-1];
+  if(cur && cur!==last.g){ // result changed outside the app (e.g. typed in the Sheet) — count it too
+    const a = apptDay(r), t = localToday();
+    stored.push({g:cur, di:r.di, date: (a && a<=t && a>last.date) ? a : t});
+  }
+  return stored;
+}
+// Call before saving: if the result group changed (e.g. Set → DNS, DNS → Sale), record when it happened.
+function withResultEvent(before, after){
+  const log = (after.notesLog||[]).slice();
+  const newG = resultGroup(after.di);
+  if(!newG) return log;
+  const prev = before ? resultEvents(before) : [];
+  const lastG = prev.length ? prev[prev.length-1].g : null;
+  if(newG===lastG) return log;
+  const t = localToday(), a = apptDay(after), lastDate = prev.length ? prev[prev.length-1].date : '';
+  const date = (a && a<=t && (!lastDate || a>lastDate)) ? a : t;
+  const out = log.filter(n=>!isResultEntry(n));
+  prev.forEach(e=>out.push({text:e.di, cat:'_result', g:e.g, entered:e.date, enteredBy:'tracker'})); // keep earlier results (e.g. the DNS that was paid)
+  out.push({text:normalizeDisp(after.di), cat:'_result', g:newG, entered:date, enteredBy:'tracker'});
+  return out;
+}
+// Date the current sale happened (latest sale result), or '' if the lead isn't currently a sale.
+function saleDay(r){
+  if(!isSaleDisp(r.di)) return '';
+  const ev = resultEvents(r).filter(e=>e.g==='sale');
+  return ev.length ? ev[ev.length-1].date : (apptDay(r) || String(r.d||'').slice(0,10));
+}
+// Sales in the dashboard's selected period (month tab / custom range), by the date they SOLD.
+function salesInView(){
+  const month = document.getElementById('monthTabs').dataset.active || 'all';
+  const q = document.getElementById('search').value.toLowerCase();
+  const fc = document.getElementById('fCanvasser').value, fd = document.getElementById('fDisp').value;
+  const dFrom = document.getElementById('fDateFrom').value, dTo = document.getElementById('fDateTo').value;
+  return scopedData().filter(r=>{
+    const sd = saleDay(r); if(!sd) return false;
+    if(dFrom || dTo){ if(dFrom && sd < dFrom) return false; if(dTo && sd > dTo) return false; }
+    else if(month!=='all' && sd.slice(0,7)!==month) return false;
+    if(fc && r.cv!==fc) return false;
+    if(fd && r.di!==fd) return false;
+    if(q && !(`${r.cu} ${r.ad} ${r.ct}`.toLowerCase().includes(q))) return false;
+    return true;
+  });
+}
+
 function renderKPIs(rows){
-  const sales = rows.filter(r=>isSaleDisp(r.di));
-  const declined = rows.filter(r=>isDeclinedDisp(r.di));
+  // Leads are counted by entry date; sales & revenue by the date they sold.
+  const sales = salesInView();
+  const declined = sales.filter(r=>isDeclinedDisp(r.di));
   const total = rows.length;
   const grossRev = sales.reduce((s,r)=>s+(r.am||0),0);
   const netRev = sales.reduce((s,r)=>s+netAmountFor(r),0);
@@ -325,8 +389,8 @@ function renderCharts(rows){
     mk('chartRep',{type:'bar',data:{labels:repTop.map(x=>x[0]),datasets:[{data:repTop.map(x=>x[1]),backgroundColor:'#1D5FD6'}]},
       options:{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{ticks:{font:{size:9.5}}},y:{ticks:{font:{size:9.5}}}}},maintainAspectRatio:false});
   }
-  const months = [...new Set(scopedData().map(r=>monthOf(r.d)))].sort();
-  const monthNet = months.map(m=> scopedData().filter(r=>monthOf(r.d)===m && isSaleDisp(r.di)).reduce((s,r)=>s+netAmountFor(r),0));
+  const months = [...new Set(scopedData().map(r=>monthOf(r.d)).concat(scopedData().map(r=>saleDay(r).slice(0,7))).filter(Boolean))].sort();
+  const monthNet = months.map(m=> scopedData().filter(r=>saleDay(r).slice(0,7)===m).reduce((s,r)=>s+netAmountFor(r),0)); // by month SOLD
   mk('chartMonth',{data:{labels:months.map(m=>({'2026-08':'Aug','2026-09':'Sep','2026-10':'Oct','2026-11':'Nov','2026-12':'Dec'}[m]||m)),
     datasets:[
       {type:'bar',label:'Net revenue',data:monthNet,backgroundColor:'#0F8A45'},
@@ -420,7 +484,7 @@ function currentMonthKey(){
 function renderGoalBox(){
   if(goalMonthKey===null) goalMonthKey = currentMonthKey();
   const monthKey = goalMonthKey;
-  const monthRows = DATA.filter(r=>monthOf(r.d)===monthKey && isSaleDisp(r.di));
+  const monthRows = DATA.filter(r=>saleDay(r).slice(0,7)===monthKey); // sales count in the month they SOLD
   const netMTD = monthRows.reduce((s,r)=>s+netAmountFor(r),0);
   const pct = Math.min(100, Math.round(netMTD/MONTHLY_NET_GOAL*100));
   const [y,m] = monthKey.split('-').map(Number);
@@ -499,7 +563,7 @@ function findRow(id){ return DATA.find(x=>String(x.rowId)===String(id)); }
 
 function openDetail(id){
   const r = findRow(id); if(!r) return;
-  const calls = r.calls||[], notes = r.notesLog||[];
+  const calls = r.calls||[], notes = visibleNotes(r);
   const core = [
     ['LP ID', r.lp||'—'],['Lead type', r.lt],['Phone', r.ph],['Secondary phone', r.ph2||'—'],
     ['Email', r.em||'—'],['Address', r.ad+', '+r.ct],['Set appointment', r.sa||'—'],['LP / actual appt', r.la||'—'],
@@ -628,7 +692,9 @@ async function saveEdit(id){
     mk:document.getElementById('e_mk').value, q:document.getElementById('e_q').value, qd:document.getElementById('e_qd').value,
     pm:document.getElementById('e_pm').value, dir:document.getElementById('e_dir').value,
   };
+  const before = {...r};
   Object.assign(r, fields);
+  r.notesLog = withResultEvent(before, r);
   await api('update', {rowId: r.rowId, fields: r});
   document.getElementById('detailModal').classList.remove('open');
   render();
@@ -670,6 +736,7 @@ async function saveNewEntry(force){
     const matches = findPossibleDuplicates(fields);
     if(matches.length){ renderAddDupeWarning(matches); return; }
   }
+  fields.notesLog = withResultEvent(null, fields);
   const res = await api('add', {fields});
   if(res.ok){ document.getElementById('addModal').classList.remove('open'); loadData(); }
 }
@@ -924,6 +991,7 @@ async function confirmParse(force){
     const calls = mergeLog(r.calls, parsed.calls);
     const notesLog = mergeLog(r.notesLog, parsed.notesLog);
     const mergedFields = {...r, ...edited, calls, notesLog};
+    mergedFields.notesLog = withResultEvent(r, mergedFields);
     if(mergedFields.lp) mergedFields.il = true;
     await api('update', {rowId: r.rowId, fields: mergedFields});
   } else {
@@ -931,6 +999,7 @@ async function confirmParse(force){
       calls: parsed.calls||[], notesLog: parsed.notesLog||[],
       cv:'Unassigned', sr:'Unassigned', pr:'Windows', di:'Data', ...edited };
     if(rec.lp) rec.il = true;
+    rec.notesLog = withResultEvent(null, rec);
     await api('add', {fields: rec});
   }
   closeParse();
@@ -1002,9 +1071,11 @@ function leadsInRange(rows, start, end){
 }
 
 function computeCanvasserBoard(canvasser, period){
-  const periodRows = leadsInRange(DATA.filter(r=>r.cv===canvasser), period.start, period.end);
-  const dns = periodRows.filter(r=>r.di==='Demo No Sale').length;
-  const sales = periodRows.filter(r=>isSaleDisp(r.di)).length;
+  // Count each DNS / Sale in the period it HAPPENED (appointment that ran / date sold), not the entry date.
+  const mine = DATA.filter(r=>r.cv===canvasser);
+  const inRange = (day, a, b)=>{ if(!day) return false; const d = parseYmd(day); return d>=a && d<=b; };
+  let dns = 0, sales = 0;
+  mine.forEach(r=> resultEvents(r).forEach(e=>{ if(inRange(e.date, period.start, period.end)){ if(e.g==='dns') dns++; else if(e.g==='sale') sales++; } }));
   const demos = dns + sales;
   const tier = tierFor(demos);
   const commission = dns*tier.dns + sales*tier.sale;
@@ -1012,15 +1083,12 @@ function computeCanvasserBoard(canvasser, period){
 
   // Net sales + bonus: for a real pay period, use the calendar month it falls in (bonus is monthly).
   // For a custom range, use that exact range instead — bonus tiers still applied for a quick "if this were the month" read.
-  let netRows;
-  if(period.isCustom){
-    netRows = periodRows;
-  } else {
-    const monthStart = new Date(Date.UTC(period.end.getUTCFullYear(), period.end.getUTCMonth(), 1));
-    const monthEnd = new Date(Date.UTC(period.end.getUTCFullYear(), period.end.getUTCMonth()+1, 0));
-    netRows = leadsInRange(DATA.filter(r=>r.cv===canvasser), monthStart, monthEnd);
+  let nStart = period.start, nEnd = period.end;
+  if(!period.isCustom){
+    nStart = new Date(Date.UTC(period.end.getUTCFullYear(), period.end.getUTCMonth(), 1));
+    nEnd = new Date(Date.UTC(period.end.getUTCFullYear(), period.end.getUTCMonth()+1, 0));
   }
-  const netThisMonth = netRows.filter(r=>isSaleDisp(r.di)).reduce((s,r)=>s+netAmountFor(r),0);
+  const netThisMonth = mine.filter(r=>inRange(saleDay(r), nStart, nEnd)).reduce((s,r)=>s+netAmountFor(r),0); // by month SOLD
   const bonus = bonusFor(netThisMonth);
   const nextBonus = BONUS_TIERS.find(b=>b.min > (bonus?bonus.max:29999));
 
