@@ -107,12 +107,33 @@ tbody td{display:none}tbody td.c-m{display:block;border:none;padding:0}.grid2,.g
   .cal-md{min-height:46px}.cal-md .sum{display:none}
   .cal-appt{grid-template-columns:58px 1fr}.cal-appt .r{grid-column:2;flex-direction:row;flex-wrap:wrap;align-items:center;text-align:left}
 }
+
+/* ----- Supervisor: LP import & LP Review ----- */
+.pill.gry{background:rgba(127,127,127,.15);color:var(--tx2)}
+.modal.wide{max-width:1000px}
+.imp-stats{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin:10px 0}
+.imp-stat{border:1px solid var(--bd);border-left-width:4px;border-radius:10px;padding:8px 10px;cursor:pointer}
+.imp-stat .l{font-size:11px;color:var(--tx2)}.imp-stat .v{font-size:18px;font-weight:700}
+.imp-stat.k-create{border-left-color:var(--info)}.imp-stat.k-fill{border-left-color:var(--sale)}.imp-stat.k-same{border-left-color:var(--mut)}
+.imp-stat.k-conf{border-left-color:var(--pend)}.imp-stat.k-skip{border-left-color:var(--cxl)}.imp-stat.k-sales{border-left-color:var(--pur)}
+table.imp-table{font-size:12px;border-radius:8px}
+table.imp-table td{vertical-align:top}
+.imp-safety{border:1px solid var(--pend);background:var(--pend-bg);color:var(--pend);border-radius:10px;padding:9px 12px;font-size:12.5px;margin-top:12px}
+@media(max-width:900px){.imp-stats{grid-template-columns:repeat(3,1fr)}
+  table.imp-table,table.imp-table thead,table.imp-table tbody,table.imp-table tr,table.imp-table td,table.imp-table th{display:revert}
+  table.imp-table thead{display:table-header-group} table.imp-table td{display:table-cell;padding:6px}}
+@media(max-width:600px){table.imp-table th:nth-child(3),table.imp-table td:nth-child(3){display:none}
+  table.imp-table{width:100%;table-layout:fixed} table.imp-table th:nth-child(1),table.imp-table td:nth-child(1){width:52px}
+  table.imp-table td{word-break:break-word} table.imp-table .pill{white-space:normal}}
 </style></head><body>
 
 <header><div class="hrow">
 <div><h1 id="pageTitle">Maverick Windows — Sales Tracker</h1><p class="sub">Canvassing &amp; sales pipeline · live Google Sheet</p></div>
-<div style="display:flex;gap:8px;align-items:center">
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
   <div class="sync" id="syncBadge" onclick="loadData()">Loading…</div>
+  <button class="btn sm" id="reviewBtn" onclick="openReview()" style="background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff;display:none">🔎 LP Review</button>
+  <button class="btn sm" id="importBtn" onclick="openImport()" style="background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff;display:none">⬆ Import from LP</button>
+  <button class="btn sm" id="adminBtn" onclick="adminButton()" title="Supervisor password (LP import & review)" style="background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff">🔑 Supervisor</button>
   <button class="btn sm" onclick="lockApp()" title="Lock this device — the password will be needed again" style="background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff">🔒 Lock</button>
   <button class="btn sm" onclick="changeApiUrl()" style="background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff">Change URL</button>
 </div>
@@ -199,6 +220,8 @@ tbody td{display:none}tbody td.c-m{display:block;border:none;padding:0}.grid2,.g
 <div class="modal-bg" id="detailModal"><div class="modal" id="detailBody"></div></div>
 <div class="modal-bg" id="addModal"><div class="modal" id="addBody"></div></div>
 <div class="modal-bg" id="parseModal"><div class="modal" id="parseBody"></div></div>
+<div class="modal-bg" id="importModal"><div class="modal wide" id="importBody"></div></div>
+<div class="modal-bg" id="reviewModal"><div class="modal wide" id="reviewBody"></div></div>
 
 <!-- Optional: a config.js in this same folder can set window.APP_CONFIG = {title, apiUrl} to skip the setup screen and label this territory. Safe to delete this line if you don't use one. -->
 <script src="config.js" onerror="console.log('No config.js in this folder — using the manual setup screen instead.')"></script>
