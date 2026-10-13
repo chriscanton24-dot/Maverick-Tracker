@@ -134,7 +134,7 @@ table.imp-table td{vertical-align:top}
   <button class="btn sm" id="reviewBtn" onclick="openReview()" style="background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff;display:none">🔎 LP Review</button>
   <button class="btn sm" id="importBtn" onclick="openImport()" style="background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff;display:none">⬆ Import from LP</button>
   <button class="btn sm" id="adminBtn" onclick="adminButton()" title="Supervisor password (LP import & review)" style="background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff">🔑 Supervisor</button>
-  <button class="btn sm" onclick="lockApp()" title="Lock this device — the password will be needed again" style="background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff">🔒 Lock</button>
+  <button class="btn sm" onclick="if(confirm('Lock the tracker on this device? The team password (and supervisor password) will be needed again.')) lockApp()" title="Lock this device — the password will be needed again" style="background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff">🔒 Lock</button>
   <button class="btn sm" onclick="changeApiUrl()" style="background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff">Change URL</button>
 </div>
 </div></header>

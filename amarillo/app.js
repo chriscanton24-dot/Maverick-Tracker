@@ -122,13 +122,40 @@ function lockApp(){
 }
 document.getElementById('lockInput').addEventListener('keydown', e=>{ if(e.key==='Enter') submitPassword(); });
 
+const WRITE_ONCE_ACTIONS = {add:1, bulkImport:1};
+const API_RETRIES = 2;
+function sleepMs(ms){ return new Promise(r=>setTimeout(r, ms)); }
+// bootstrap sends leads with blank fields left out (smaller, faster). Put every field back exactly as the old "list" gave it.
+const ARRAY_KEYS = {mat:1, is:1, pi:1, calls:1, notesLog:1}, BOOL_KEYS = {gm:1, il:1};
+function expandRows(rows, keys){
+  rows.forEach(r=>keys.forEach(k=>{ if(!(k in r)) r[k] = ARRAY_KEYS[k] ? [] : BOOL_KEYS[k] ? false : ''; }));
+  return rows;
+}
 async function api(action, payload){
   const url = getApiUrl();
   if(action==='update' && payload && payload.fields) payload = {...payload, fields: restoreOriginalNames(payload.fields)};
   if(action==='saveSetting' && payload && payload.cv) payload = {...payload, cv: settingCv(payload.cv)};
   const adminKey = (payload && payload.adminKey) || getAdminKey();
-  const r = await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify({action, ...payload, key: getKey(), adminKey}) });
-  const res = await r.json();
+  // Adds/imports carry a one-time id: if Google bounces and we retry, the backend answers from memory instead of writing twice.
+  const reqId = WRITE_ONCE_ACTIONS[action] ? Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10) : undefined;
+  const body = JSON.stringify({action, ...payload, key: getKey(), adminKey, reqId});
+  let res;
+  for(let attempt=0; ; attempt++){
+    try{
+      const r = await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body });
+      res = await r.json();
+    }catch(e){
+      // Network hiccup or a Google error page. Safe to resend only for reads/edits (adds/imports rely on the bounce retry below).
+      if(!WRITE_ONCE_ACTIONS[action] && attempt < API_RETRIES){ await sleepMs(1500*(attempt+1)); continue; }
+      throw e;
+    }
+    // Google was slow and bounced the request without the password — NOT a wrong password. Try again quietly.
+    if(res && res.ok===false && res.error==='retry'){
+      if(attempt < API_RETRIES){ await sleepMs(1500*(attempt+1)); continue; }
+      throw new Error('Google was slow to answer. Tap the sync badge to try again.');
+    }
+    break;
+  }
   if(res && res.ok===false && res.error==='admin_unauthorized' && action!=='checkAdmin'){ setAdminKey(''); updateAdminUI(); alert('Supervisor password is wrong or was changed — supervisor mode turned off.'); throw new Error('admin_unauthorized'); }
   if(res && res.ok===false && res.error==='unauthorized'){ setKey(''); showLock('Wrong or changed password — please enter the team password.'); throw new Error('unauthorized'); }
   if(res && res.ok===false && /APP_PASSWORD not set/.test(res.error||'')){ showLock('The backend has no team password set yet (APP_PASSWORD in Apps Script → Project Settings → Script Properties).'); throw new Error(res.error); }
@@ -204,18 +231,25 @@ async function loadData(){
   const badge = document.getElementById('syncBadge');
   badge.textContent = 'Syncing…';
   try{
-    const res = await api('list');
+    // One trip: leads + canvasser settings + LP Review. Falls back to the old 3-trip load if this territory's Code.gs isn't updated yet.
+    let res = await api('bootstrap'), boot = true;
+    if(res && res.ok===false && res.error==='unknown action'){ boot = false; res = await api('list'); }
     if(!res.ok) throw new Error(res.error||'load failed');
+    if(boot && res.compact) expandRows(res.rows, res.keys||[]);
     // Rows marked "Duplicate Of" (merged into another lead) stay in the Sheet but are hidden everywhere in the app.
     DATA = res.rows.filter(r=>!(r.dupOf && String(r.dupOf).trim()));
     // Settings first now, because canvasser aliases live there and are needed before merging names.
-    try{ const sres = await api('settings'); if(sres.ok) SETTINGS = sres.settings; }catch(e){ console.error(e); }
+    if(boot) SETTINGS = res.settings||[];
+    else { try{ const sres = await api('settings'); if(sres.ok) SETTINGS = sres.settings; }catch(e){ console.error(e); } }
     canonicalizeCanvassers(DATA);
     // Supervisor mode: the backend only sends "Needs LP check" imports (and the LP Review list) with the owner password.
     ADMIN_ON = !!res.admin;
     if(getAdminKey() && !ADMIN_ON) setAdminKey('');
     REVIEW_ITEMS = [];
-    if(ADMIN_ON){ try{ const rv = await api('reviewList'); if(rv.ok) REVIEW_ITEMS = rv.items||[]; }catch(e){ console.error(e); } }
+    if(ADMIN_ON){
+      if(boot) REVIEW_ITEMS = res.reviewItems||[];
+      else { try{ const rv = await api('reviewList'); if(rv.ok) REVIEW_ITEMS = rv.items||[]; }catch(e){ console.error(e); } }
+    }
     updateAdminUI();
     badge.textContent = 'Synced ✓ '+DATA.filter(r=>!isPendingLP(r)).length+' (tap to refresh)';
     document.getElementById('mainApp').style.display='block';
@@ -1578,7 +1612,7 @@ function updateAdminUI(){
   a.textContent = ADMIN_ON ? '🔑 Supervisor ✓' : '🔑 Supervisor';
   ib.style.display = ADMIN_ON ? '' : 'none';
   rb.style.display = ADMIN_ON ? '' : 'none';
-  if(ADMIN_ON){ const c = reviewOpenCount(), n = c.stored + c.pending; rb.textContent = n ? `🔎 LP Review: ${n} left · ${c.sales} sales to verify` : '🔎 LP Review ✓'; rb.style.background = n ? 'var(--pend)' : ''; }
+  if(ADMIN_ON){ const c = reviewOpenCount(), n = c.stored + c.pending; rb.textContent = n ? `🔎 LP Review: ${n} left · ${c.sales} sales to verify` : '🔎 LP Review ✓'; rb.style.background = n ? 'var(--pend)' : 'rgba(255,255,255,.14)'; /* empty list: keep the header's dark style (was white-on-white) */ }
 }
 function adminButton(){
   if(ADMIN_ON){ if(confirm('Leave supervisor mode on this device? Imported "Needs LP check" leads and LP Review will be hidden again.')){ setAdminKey(''); ADMIN_ON=false; REVIEW_ITEMS=[]; updateAdminUI(); loadData(); } return; }
