@@ -24,9 +24,10 @@ const DISP_STYLE = {
   'Data':'info','Called To Confirm':'info','Matched':'info',
   'Set':'pend','Pending':'pend','Unentered':'pend','Issue':'pend',
   'Unconfirmed':'pur','Demo No Sale':'pur','Demo (1-Leg)':'pur',
-  'Call To Cancel':'cxl','Customer Cancel at Door':'cxl','Customer No Show':'cxl'
+  'Call To Cancel':'cxl','Customer Cancel at Door':'cxl','Customer No Show':'cxl',
+  'Needs LP check':'gry'
 };
-const DISP_OPTIONS = ['Data','Set','Unconfirmed','Called To Confirm','Cancelled','Call To Cancel','Customer Cancel at Door','Customer No Show','Demo No Sale','Demo (1-Leg)','Sale','Sale (WIP)','Sale (Declined)','Pending','Unentered','Issue','Matched'];
+const DISP_OPTIONS = ['Data','Set','Unconfirmed','Called To Confirm','Cancelled','Call To Cancel','Customer Cancel at Door','Customer No Show','Demo No Sale','Demo (1-Leg)','Sale','Sale (WIP)','Sale (Declined)','Pending','Unentered','Issue','Matched','Needs LP check'];
 
 // LeadPerfection short codes → the full names the app uses everywhere (leaderboard, KPIs, charts, pills).
 // Matching ignores upper/lower case and extra spaces. Unknown values are left exactly as they are.
@@ -114,19 +115,48 @@ function submitPassword(){
   loadData();
 }
 function lockApp(){
-  setKey('');
+  setKey(''); setAdminKey(''); ADMIN_ON = false; REVIEW_ITEMS = []; updateAdminUI();
   DATA = []; SETTINGS = [];
   document.querySelectorAll('.modal-bg.open').forEach(m=>m.classList.remove('open'));
   showLock('Locked. Enter the team password to open the tracker again.');
 }
 document.getElementById('lockInput').addEventListener('keydown', e=>{ if(e.key==='Enter') submitPassword(); });
 
+const WRITE_ONCE_ACTIONS = {add:1, bulkImport:1};
+const API_RETRIES = 2;
+function sleepMs(ms){ return new Promise(r=>setTimeout(r, ms)); }
+// bootstrap sends leads with blank fields left out (smaller, faster). Put every field back exactly as the old "list" gave it.
+const ARRAY_KEYS = {mat:1, is:1, pi:1, calls:1, notesLog:1}, BOOL_KEYS = {gm:1, il:1};
+function expandRows(rows, keys){
+  rows.forEach(r=>keys.forEach(k=>{ if(!(k in r)) r[k] = ARRAY_KEYS[k] ? [] : BOOL_KEYS[k] ? false : ''; }));
+  return rows;
+}
 async function api(action, payload){
   const url = getApiUrl();
   if(action==='update' && payload && payload.fields) payload = {...payload, fields: restoreOriginalNames(payload.fields)};
   if(action==='saveSetting' && payload && payload.cv) payload = {...payload, cv: settingCv(payload.cv)};
-  const r = await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify({action, ...payload, key: getKey()}) });
-  const res = await r.json();
+  const adminKey = (payload && payload.adminKey) || getAdminKey();
+  // Adds/imports carry a one-time id: if Google bounces and we retry, the backend answers from memory instead of writing twice.
+  const reqId = WRITE_ONCE_ACTIONS[action] ? Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10) : undefined;
+  const body = JSON.stringify({action, ...payload, key: getKey(), adminKey, reqId});
+  let res;
+  for(let attempt=0; ; attempt++){
+    try{
+      const r = await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body });
+      res = await r.json();
+    }catch(e){
+      // Network hiccup or a Google error page. Safe to resend only for reads/edits (adds/imports rely on the bounce retry below).
+      if(!WRITE_ONCE_ACTIONS[action] && attempt < API_RETRIES){ await sleepMs(1500*(attempt+1)); continue; }
+      throw e;
+    }
+    // Google was slow and bounced the request without the password — NOT a wrong password. Try again quietly.
+    if(res && res.ok===false && res.error==='retry'){
+      if(attempt < API_RETRIES){ await sleepMs(1500*(attempt+1)); continue; }
+      throw new Error('Google was slow to answer. Tap the sync badge to try again.');
+    }
+    break;
+  }
+  if(res && res.ok===false && res.error==='admin_unauthorized' && action!=='checkAdmin'){ setAdminKey(''); updateAdminUI(); alert('Supervisor password is wrong or was changed — supervisor mode turned off.'); throw new Error('admin_unauthorized'); }
   if(res && res.ok===false && res.error==='unauthorized'){ setKey(''); showLock('Wrong or changed password — please enter the team password.'); throw new Error('unauthorized'); }
   if(res && res.ok===false && /APP_PASSWORD not set/.test(res.error||'')){ showLock('The backend has no team password set yet (APP_PASSWORD in Apps Script → Project Settings → Script Properties).'); throw new Error(res.error); }
   return res;
@@ -201,20 +231,33 @@ async function loadData(){
   const badge = document.getElementById('syncBadge');
   badge.textContent = 'Syncing…';
   try{
-    const res = await api('list');
+    // One trip: leads + canvasser settings + LP Review. Falls back to the old 3-trip load if this territory's Code.gs isn't updated yet.
+    let res = await api('bootstrap'), boot = true;
+    if(res && res.ok===false && res.error==='unknown action'){ boot = false; res = await api('list'); }
     if(!res.ok) throw new Error(res.error||'load failed');
+    if(boot && res.compact) expandRows(res.rows, res.keys||[]);
     // Rows marked "Duplicate Of" (merged into another lead) stay in the Sheet but are hidden everywhere in the app.
     DATA = res.rows.filter(r=>!(r.dupOf && String(r.dupOf).trim()));
     // Settings first now, because canvasser aliases live there and are needed before merging names.
-    try{ const sres = await api('settings'); if(sres.ok) SETTINGS = sres.settings; }catch(e){ console.error(e); }
+    if(boot) SETTINGS = res.settings||[];
+    else { try{ const sres = await api('settings'); if(sres.ok) SETTINGS = sres.settings; }catch(e){ console.error(e); } }
     canonicalizeCanvassers(DATA);
-    badge.textContent = 'Synced ✓ '+DATA.length+' (tap to refresh)';
+    // Supervisor mode: the backend only sends "Needs LP check" imports (and the LP Review list) with the owner password.
+    ADMIN_ON = !!res.admin;
+    if(getAdminKey() && !ADMIN_ON) setAdminKey('');
+    REVIEW_ITEMS = [];
+    if(ADMIN_ON){
+      if(boot) REVIEW_ITEMS = res.reviewItems||[];
+      else { try{ const rv = await api('reviewList'); if(rv.ok) REVIEW_ITEMS = rv.items||[]; }catch(e){ console.error(e); } }
+    }
+    updateAdminUI();
+    badge.textContent = 'Synced ✓ '+DATA.filter(r=>!isPendingLP(r)).length+' (tap to refresh)';
     document.getElementById('mainApp').style.display='block';
     document.getElementById('setupScreen').style.display='none';
     setupViewAs();
     render();
   }catch(err){
-    if(err && (err.message==='unauthorized' || /APP_PASSWORD/.test(err.message||''))) return; // lock screen already shown
+    if(err && (err.message==='unauthorized' || err.message==='admin_unauthorized' || /APP_PASSWORD/.test(err.message||''))) return; // already handled
     badge.textContent = 'Sync error — tap to retry';
     console.error(err);
   }
@@ -249,7 +292,7 @@ function populateFilters(){
   selC.innerHTML = '<option value="">All canvassers</option>' + cvs.map(c=>`<option ${c===curC?'selected':''}>${c}</option>`).join('');
   selD.innerHTML = '<option value="">All dispositions</option>' + dis.map(d=>`<option ${d===curD?'selected':''}>${d}</option>`).join('');
 
-  const months = [...new Set(base.map(r=>monthOf(r.d)))].sort();
+  const months = [...new Set(base.map(r=>monthOf(r.d)).filter(Boolean))].sort();
   const tabs = document.getElementById('monthTabs');
   const activeMonth = tabs.dataset.active || 'all';
   const names = {'2026-08':'August','2026-09':'September','2026-10':'October','2026-11':'November','2026-12':'December'};
@@ -326,7 +369,8 @@ function withResultEvent(before, after){
   const lastG = prev.length ? prev[prev.length-1].g : null;
   if(newG===lastG) return log;
   const t = localToday(), a = apptDay(after), lastDate = prev.length ? prev[prev.length-1].date : '';
-  const date = (a && a<=t && (!lastDate || a>lastDate)) ? a : t;
+  let date = (a && a<=t && (!lastDate || a>lastDate)) ? a : t;
+  if(newG==='sale'){ const c = lpDateISO((lpInfo(after)||{}).cdt); if(c && c<=t) date = c; } // LP Contract Dt = the sale date
   const out = log.filter(n=>!isResultEntry(n));
   prev.forEach(e=>out.push({text:e.di, cat:'_result', g:e.g, entered:e.date, enteredBy:'tracker'})); // keep earlier results (e.g. the DNS that was paid)
   out.push({text:normalizeDisp(after.di), cat:'_result', g:newG, entered:date, enteredBy:'tracker'});
@@ -336,7 +380,7 @@ function withResultEvent(before, after){
 function saleDay(r){
   if(!isSaleDisp(r.di)) return '';
   const ev = resultEvents(r).filter(e=>e.g==='sale');
-  return ev.length ? ev[ev.length-1].date : (apptDay(r) || String(r.d||'').slice(0,10));
+  return ev.length ? ev[ev.length-1].date : (lpDateISO((lpInfo(r)||{}).cdt) || apptDay(r) || String(r.d||'').slice(0,10));
 }
 // Sales in the dashboard's selected period (month tab / custom range), by the date they SOLD.
 function salesInView(){
@@ -514,9 +558,10 @@ function shiftGoalMonth(delta){
 function render(){
   populateFilters();
   const rows = filtered();
-  renderKPIs(rows);
+  const counted = rows.filter(r=>!isPendingLP(r)); // "Needs LP check" imports count nowhere until verified
+  renderKPIs(counted);
   renderGoalBox();
-  renderCharts(rows);
+  renderCharts(counted);
   renderTable(rows);
   const lb = document.getElementById('leaderboardBox');
   if(lb && lb.open) renderLeaderboard();
@@ -1299,6 +1344,7 @@ function calShortDate(key){ const [y,m,d]=key.slice(0,10).split('-').map(Number)
 function calAppointments(){
   const out = [];
   scopedData().forEach(r=>{
+    if(isPendingLP(r)) return;
     const src = r.la || r.sa; if(!src) return;
     const yr = parseInt(String(r.d||'').slice(0,4)) || undefined;
     const key = dateSortKey(src, yr); if(!key) return;
@@ -1539,3 +1585,409 @@ async function doMerge(dupId, keepId){
   await loadData();
   openDetail(keepId);
 }
+
+// ===================== Supervisor mode · LP historic import · LP Review =====================
+// Owner/supervisor password (ADMIN_PASSWORD in Apps Script) unlocks: the "Import from LP" screen, the
+// LP Review work list, and seeing imported leads that are still "Needs LP check" (the backend never sends
+// those to canvassers). Imported leads count NOWHERE until a supervisor sets their disposition.
+const ADMIN_STORE = 'mw_admin:' + location.pathname;
+let ADMIN_ON = false;
+let REVIEW_ITEMS = [];
+function getAdminKey(){ try{ return localStorage.getItem(ADMIN_STORE) || ''; }catch(e){ return ''; } }
+function setAdminKey(v){ try{ v ? localStorage.setItem(ADMIN_STORE, v) : localStorage.removeItem(ADMIN_STORE); }catch(e){} }
+function isPendingLP(r){ return String(r && r.di || '').trim().toLowerCase() === 'needs lp check'; }
+function lpInfo(r){ const n = (r && r.notesLog || []).find(x=>x && x.cat==='LP Import' && x.lp); return n ? n.lp : null; }
+function lpDateISO(s){ const m = String(s||'').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); return m ? m[3]+'-'+m[1].padStart(2,'0')+'-'+m[2].padStart(2,'0') : ''; }
+function todayUS(){ const n=new Date(); return String(n.getMonth()+1).padStart(2,'0')+'/'+String(n.getDate()).padStart(2,'0')+'/'+n.getFullYear(); }
+function canonCv(name){ const m = buildAliasMap()[nameKey(name)]; return personName(m || name); }
+
+function reviewOpenCount(){
+  const stored = REVIEW_ITEMS.filter(i=>i.status!=='resolved').length;
+  const pending = DATA.filter(r=>isPendingLP(r) && lpInfo(r)).length; // imported, not verified yet
+  return {stored, pending, sales: DATA.filter(r=>isPendingLP(r) && (lpInfo(r)||{}).job).length + REVIEW_ITEMS.filter(i=>i.status!=='resolved' && i.type==='sold').length};
+}
+function updateAdminUI(){
+  const a = document.getElementById('adminBtn'), ib = document.getElementById('importBtn'), rb = document.getElementById('reviewBtn');
+  if(!a) return;
+  a.textContent = ADMIN_ON ? '🔑 Supervisor ✓' : '🔑 Supervisor';
+  ib.style.display = ADMIN_ON ? '' : 'none';
+  rb.style.display = ADMIN_ON ? '' : 'none';
+  if(ADMIN_ON){ const c = reviewOpenCount(), n = c.stored + c.pending; rb.textContent = n ? `🔎 LP Review: ${n} left · ${c.sales} sales to verify` : '🔎 LP Review ✓'; rb.style.background = n ? 'var(--pend)' : 'rgba(255,255,255,.14)'; /* empty list: keep the header's dark style (was white-on-white) */ }
+}
+function adminButton(){
+  if(ADMIN_ON){ if(confirm('Leave supervisor mode on this device? Imported "Needs LP check" leads and LP Review will be hidden again.')){ setAdminKey(''); ADMIN_ON=false; REVIEW_ITEMS=[]; updateAdminUI(); loadData(); } return; }
+  const b = document.getElementById('importBody');
+  b.innerHTML = `<button class="modal-close" onclick="closeImport()">&times;</button>
+    <h2>🔑 Supervisor password</h2>
+    <p class="note" style="margin:4px 0 10px">Unlocks <b>Import from LP</b>, <b>LP Review</b>, and imported leads that are still "Needs LP check". Separate from the team password.</p>
+    <input type="password" id="admInput" autocomplete="off" placeholder="Supervisor password" style="width:100%;padding:9px;border-radius:8px;border:1px solid var(--bd);background:var(--bg);color:var(--tx);font-size:14px">
+    <p id="admMsg" class="note" style="color:var(--cxl);display:none"></p>
+    <button class="btn primary" style="width:100%;margin-top:8px" onclick="submitAdmin()">Unlock</button>`;
+  document.getElementById('importModal').classList.add('open');
+  const i = document.getElementById('admInput'); i.addEventListener('keydown', e=>{ if(e.key==='Enter') submitAdmin(); }); setTimeout(()=>i.focus(),50);
+}
+async function submitAdmin(){
+  const v = document.getElementById('admInput').value.trim(); if(!v) return;
+  const msg = document.getElementById('admMsg');
+  try{
+    const res = await api('checkAdmin', {adminKey: v});
+    if(!res.ok){ msg.style.display='block'; msg.textContent = res.error==='admin_unauthorized' ? 'Wrong supervisor password.' : res.error; return; }
+    setAdminKey(v); closeImport(); await loadData();
+  }catch(e){ msg.style.display='block'; msg.textContent='Could not check the password — connection problem?'; }
+}
+function closeImport(){ document.getElementById('importModal').classList.remove('open'); }
+function closeReview(){ document.getElementById('reviewModal').classList.remove('open'); }
+
+// ---------- LP paste parser ----------
+// One row per prospect: Prosp # | Last | First | Phone | Address | City | State | Zip | Job # | Contract Dt | Sale $
+// Anything typed before the first Prospect # (e.g. "Galindo, Allan ") is ignored. Blank trailing columns are fine.
+function parseLPPaste(text){
+  const rows = [], bad = [], seen = {};
+  String(text||'').split(/\r?\n/).forEach((line, i)=>{
+    if(!line.trim()) return;
+    const m = line.match(/(\d{4,7})\t(.*)$/);
+    if(!m){ bad.push({line:i+1, text:line.slice(0,80)}); return; }
+    const f = [m[1], ...m[2].split('\t')].map(x=>x.trim());
+    if(f.length < 6 || !f[1]){ bad.push({line:i+1, text:line.slice(0,80)}); return; }
+    const r = {lp:f[0], last:f[1], first:f[2]||'', ph:f[3]||'', ad:f[4]||'', ct:f[5]||'', st:f[6]||'', zip:f[7]||'', job:f[8]||'', cdt:f[9]||'', amt:String(f[10]||'').replace(/[$,\s]/g,'')};
+    r.cu = (r.first+' '+r.last).replace(/\s+/g,' ').trim();
+    if(seen[r.lp]){ bad.push({line:i+1, text:'Prospect '+r.lp+' appears twice in this paste — second copy ignored'}); return; }
+    seen[r.lp] = true;
+    rows.push(r);
+  });
+  return {rows, bad};
+}
+
+// ---------- Planner: decides what the import WOULD do (nothing is saved here) ----------
+function planLPImport(rows, cv){
+  const pool = DATA; // supervisors get every lead, including earlier imports, so re-pasting never duplicates
+  const claimed = {};
+  return rows.map(r=>{
+    const out = {r, fills:{}, conflicts:[], sold:null};
+    const byId = pool.filter(x=>String(x.lp||'').replace(/\D/g,'') === r.lp);
+    if(byId.length > 1){ out.kind='dup'; out.rows = byId.map(x=>x.rowId); out.why = `${byId.length} leads already have Prospect ${r.lp} (Sheet rows ${out.rows.join(', ')}). Merge them first.`; return out; }
+    let m = byId[0], how = 'Prospect ID';
+    if(!m){
+      const strong = pool.filter(x=>(r.ad && sameAddress(r.ad, x.ad)) || (normPhone(r.ph) && (normPhone(x.ph)===normPhone(r.ph) || normPhone(x.ph2)===normPhone(r.ph))));
+      const nameOnly = pool.filter(x=>!strong.includes(x) && sameName(r.cu, x.cu));
+      const fb = strong[0] || nameOnly[0];
+      if(fb){
+        const why = strong[0] ? ((r.ad && sameAddress(r.ad, fb.ad)) ? 'same address' : 'same phone') : 'same name only';
+        if((fb.lp && String(fb.lp).replace(/\D/g,'')!==r.lp) || !strong[0] || strong.length>1){
+          out.kind='diff'; out.lead=fb;
+          out.why = !strong[0] ? `Same customer name as Sheet row ${fb.rowId} (${fb.cu}), but no address/phone match.`
+                  : strong.length>1 ? `Matches ${strong.length} Sheet leads by ${why}.`
+                  : `Looks like Sheet row ${fb.rowId} (${fb.cu}) by ${why}, but that lead has a different LP ID (${fb.lp}).`;
+          return out;
+        }
+        m = fb; how = why + ' (Sheet had no LP ID)';
+      }
+    }
+    if(!m){ out.kind='create'; return out; }
+    if(claimed[m.rowId]){ out.kind='diff'; out.lead=m; out.why=`Matches the same Sheet lead (row ${m.rowId}) as Prospect ${claimed[m.rowId]} in this paste.`; return out; }
+    claimed[m.rowId] = r.lp;
+    out.lead = m; out.how = how;
+    // Fill blanks only (the backend double-checks the cell is still blank before writing)
+    if(!String(m.lp||'').trim()) out.fills.lp = r.lp;
+    if(!normPhone(m.ph) && r.ph) out.fills.ph = r.ph;
+    if(!String(m.ad||'').trim() && r.ad) out.fills.ad = r.ad;
+    if(!String(m.ct||'').trim() && r.ct) out.fills.ct = r.ct;
+    if(!String(m.cu||'').trim() && r.cu) out.fills.cu = r.cu;
+    if(!String(m.cv||'').trim()) out.fills.cv = cv;
+    if(r.amt && (m.am==='' || m.am==null)) out.fills.am = Number(r.amt)||0;
+    if(!m.il) out.fills.il = true;
+    // Conflicts — formatting differences ("St" vs "Street", "(806) " vs "(806)", "Juan & Joanna" vs "Juan") are NOT conflicts
+    const lastTok = nameTokens(r.last);
+    if(String(m.cu||'').trim() && !sameName(r.cu, m.cu) && !nameTokens(m.cu).some(w=>lastTok.includes(w))) out.conflicts.push({field:'cu', label:'Customer', lpVal:r.cu, sheetVal:m.cu});
+    if(normPhone(m.ph) && normPhone(r.ph) && normPhone(m.ph)!==normPhone(r.ph) && normPhone(m.ph2)!==normPhone(r.ph)) out.conflicts.push({field:'ph', label:'Phone', lpVal:r.ph, sheetVal:m.ph});
+    if(String(m.ad||'').trim() && r.ad && !sameAddress(r.ad, m.ad)) out.conflicts.push({field:'ad', label:'Address', lpVal:r.ad, sheetVal:m.ad});
+    if(String(m.ct||'').trim() && r.ct && !String(m.ct).toLowerCase().startsWith(r.ct.toLowerCase())) out.conflicts.push({field:'ct', label:'City', lpVal:r.ct, sheetVal:m.ct});
+    if(String(m.cv||'').trim() && nameKey(m.cv)!==nameKey(cv)) out.conflicts.push({field:'cv', label:'Canvasser', lpVal:cv, sheetVal:m.cv});
+    if(r.amt && m.am!=='' && m.am!=null && Number(r.amt)!==Number(m.am)) out.conflicts.push({field:'am', label:'Gross amount', lpVal:r.amt, sheetVal:String(m.am)});
+    if(r.job && !isSaleDisp(m.di) && !isPendingLP(m)) out.sold = {job:r.job, cdt:r.cdt, amt:r.amt, zip:r.zip};
+    out.kind = (out.conflicts.length || out.sold) ? 'conf' : (Object.keys(out.fills).length ? 'fill' : 'same');
+    return out;
+  });
+}
+
+// ---------- Import screen ----------
+let IMP = null; // {cv, isNew, archive, plan, bad}
+function importCanvasserOptions(){
+  const names = {};
+  DATA.forEach(r=>{ if(r.cv && String(r.cv).trim() && String(r.cv).toLowerCase()!=='unassigned') names[nameKey(r.cv)] = r.cv; });
+  SETTINGS.forEach(s=>{ const n = canonCv(s.cv); if(n) names[nameKey(n)] = names[nameKey(n)] || n; });
+  const all = Object.values(names).sort((a,b)=>a.localeCompare(b));
+  return {active: all.filter(n=>isActiveCanvasser(n)), archived: all.filter(n=>!isActiveCanvasser(n))};
+}
+function openImport(){
+  if(!ADMIN_ON){ adminButton(); return; }
+  const o = importCanvasserOptions();
+  document.getElementById('importBody').innerHTML = `<button class="modal-close" onclick="closeImport()">&times;</button>
+    <h2>⬆ Import from LP <span class="note" style="font-weight:400">· supervisors only</span></h2>
+    <p class="note" style="margin:4px 0 0">One canvasser per paste. Every row is assigned to the canvasser you pick. Nothing is saved until you review the preview and hit Apply.</p>
+    <div class="field" style="margin-top:10px"><label>Canvasser</label>
+      <select id="impCv" onchange="impCvChanged()">
+        <optgroup label="In the tracker">${o.active.map(n=>`<option value="${calH(n)}">${calH(n)}</option>`).join('')}</optgroup>
+        ${o.archived.length?`<optgroup label="Archived (hidden on leaderboard, still counted)">${o.archived.map(n=>`<option value="${calH(n)}">${calH(n)} (archived)</option>`).join('')}</optgroup>`:''}
+        <option value="__new">➕ New canvasser — not in the tracker yet (type the name)</option>
+      </select></div>
+    <div id="impNew" style="display:none">
+      <div class="field"><label>New canvasser name (as it should show in the tracker, e.g. "Maria Lopez")</label><input type="text" id="impNewName" placeholder="First Last" oninput="impCvChanged()"></div>
+      <label style="display:flex;gap:6px;align-items:center;font-size:12.5px;margin:-4px 0 8px"><input type="checkbox" id="impArchive" checked style="width:auto"> Mark as <b>Archived</b> (no longer with the company — hidden on the leaderboard, sales still count)</label>
+    </div>
+    <p class="note" id="impLpName" style="margin:0 0 8px"></p>
+    <div class="field"><label>Paste the LP Prospect search results (LP → Prospects → Search → Promoter → select the grid → copy)</label>
+      <textarea id="impPaste" spellcheck="false" style="width:100%;min-height:180px;font-family:ui-monospace,Menlo,monospace;font-size:11px;white-space:pre;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--tx);padding:8px"></textarea></div>
+    <p class="note" style="margin:0 0 8px">Typing the name in front of the paste is fine — anything before the first Prospect # is ignored.</p>
+    <button class="btn primary" style="width:100%" onclick="impPreview()">Preview import →</button>`;
+  document.getElementById('importModal').classList.add('open');
+  impCvChanged();
+}
+function impCvName(){
+  const v = document.getElementById('impCv').value; if(v!=='__new') return v;
+  let n = personName(document.getElementById('impNewName').value.trim()); if(!n) return '';
+  if(n===n.toLowerCase() || n===n.toUpperCase()) n = n.toLowerCase().replace(/(^|[\s'-])([a-z])/g,(m,a,b)=>a+b.toUpperCase()); // "paul casteel" → "Paul Casteel"
+  const o = importCanvasserOptions(), known = o.active.concat(o.archived).find(x=>nameKey(x)===nameKey(canonCv(n))); // typed an existing person or alias → use that name
+  return known || n;
+}
+function impCvChanged(){
+  const isNew = document.getElementById('impCv').value==='__new';
+  document.getElementById('impNew').style.display = isNew ? '' : 'none';
+  const n = impCvName(), p = n.split(' ');
+  document.getElementById('impLpName').innerHTML = n ? `LP shows this person as <b>${calH(p.length>1 ? p.slice(1).join(' ')+', '+p[0] : n)}</b>. Existing leads under "Last, First" or an alias (Canvasser Settings → Other names) match automatically.` : '';
+}
+const IMP_KIND = {create:['🆕 Will create','info'], fill:['✅ Matched · fills blanks','sale'], same:['= Matched · no change','gry'], conf:['⚠ Matched · to review','pend'], dup:['⛔ Skipped · needs you','cxl'], diff:['⛔ Skipped · needs you','cxl']};
+let impTab = 'all';
+function impPreview(){
+  const cv = impCvName();
+  if(!cv){ alert('Pick or type the canvasser first.'); return; }
+  const {rows, bad} = parseLPPaste(document.getElementById('impPaste').value);
+  if(!rows.length){ alert('No LP rows found in the paste. Copy the results grid from LP and paste it here.'); return; }
+  const isNew = document.getElementById('impCv').value==='__new';
+  IMP = {cv, isNew, archive: isNew && document.getElementById('impArchive').checked, plan: planLPImport(rows, cv), bad, paste: document.getElementById('impPaste').value};
+  impTab = 'all'; impRenderPreview();
+}
+function impCounts(){
+  const P = IMP.plan, c = k=>P.filter(p=>p.kind===k).length;
+  const sales = P.filter(p=>p.r.job);
+  return {create:c('create'), fill:c('fill'), same:c('same'), conf:c('conf'), skip:c('dup')+c('diff'), sales:sales.length, salesAmt:sales.reduce((s,p)=>s+(Number(p.r.amt)||0),0),
+    reviewItems: P.reduce((n,p)=>n+p.conflicts.length+(p.sold?1:0)+((p.kind==='dup'||p.kind==='diff')?1:0),0)};
+}
+function impRenderPreview(){
+  const k = impCounts(), P = IMP.plan;
+  const stat = (key,label,v)=>`<div class="imp-stat k-${key}" onclick="impTab='${key}';impRenderPreview()"><div class="l">${label}</div><div class="v">${v}</div></div>`;
+  const tabs = [['all','All'],['create','🆕 New'],['fill','✅ Fill blanks'],['same','= No change'],['conf','⚠ To review'],['skip','⛔ Skipped'],['sales','💜 Sales']];
+  const list = P.filter(p=> impTab==='all' || (impTab==='sales' ? !!p.r.job : impTab==='skip' ? (p.kind==='dup'||p.kind==='diff') : p.kind===impTab));
+  const lbl = {lp:'LP ID',ph:'Phone',ad:'Address',ct:'City',cu:'Customer',cv:'Canvasser',am:'Gross amount',il:'In LP'};
+  document.getElementById('importBody').innerHTML = `<button class="modal-close" onclick="closeImport()">&times;</button>
+    <h2>Preview — ${calH(IMP.cv)} <span class="note" style="font-weight:400">· nothing has been saved</span></h2>
+    <p class="note" style="margin:2px 0 0">${P.length} rows read${IMP.bad.length?' · '+IMP.bad.length+' line(s) could not be read (listed at the bottom)':''}. Matching order: Prospect ID → address → phone → name.</p>
+    <div class="imp-stats">${stat('create','🆕 New leads',k.create)}${stat('fill','✅ Fill blanks',k.fill)}${stat('same','= No change',k.same)}${stat('conf','⚠ To review',k.conf)}${stat('skip','⛔ Skipped',k.skip)}${stat('sales','💜 Sales (LP)',k.sales+' · '+fmtMoney(k.salesAmt))}</div>
+    <div class="tabs" style="margin-bottom:8px">${tabs.map(([t,l])=>`<div class="tab ${t===impTab?'active':''}" onclick="impTab='${t}';impRenderPreview()">${l}</div>`).join('')}</div>
+    <div style="overflow-x:auto"><table class="imp-table"><thead><tr><th>Prosp #</th><th>Customer (LP)</th><th>City</th><th>Result</th><th>Details</th></tr></thead><tbody>
+    ${list.map(p=>{
+      const r = p.r; let d = '';
+      if(p.kind==='create') d = `New lead → <b>${calH(IMP.cv)}</b> · <b>Needs LP check</b> (hidden from the team until verified)${r.job?`<br><span class="pill pur">💜 Sale to verify</span> Job #${calH(r.job)} · sold ${calH(r.cdt)} · ${fmtMoney(r.amt)} gross`:''}`;
+      else if(p.kind==='dup' || p.kind==='diff') d = calH(p.why) + ' <b>Not linked, not created</b> — goes to LP Review.';
+      else {
+        d = `Sheet row ${p.lead.rowId} · <i>${calH(p.lead.cu)}</i> · matched by ${calH(p.how)}`;
+        const f = Object.keys(p.fills); if(f.length) d += '<br>Fill blank: ' + f.map(x=>`<span style="color:var(--sale);font-weight:600">${lbl[x]} → ${calH(x==='il'?'Yes':x==='am'?fmtMoney(p.fills[x]):p.fills[x])}</span>`).join(' · ');
+        p.conflicts.forEach(c=>{ d += `<br>⚠ <b>${c.label}</b>: LP <span style="color:var(--info);font-weight:600">${calH(c.label==='Gross amount'?fmtMoney(c.lpVal):c.lpVal)}</span> vs Sheet <span style="color:var(--sale);font-weight:600">${calH(c.label==='Gross amount'?fmtMoney(c.sheetVal):c.sheetVal)}</span> → Sheet kept, sent to LP Review`; });
+        if(p.sold) d += `<br>💜 <b>LP shows SOLD</b> (Job #${calH(p.sold.job)} · ${calH(p.sold.cdt)} · ${fmtMoney(p.sold.amt)}) but the Sheet says <b>${calH(p.lead.di||'—')}</b> → sent to LP Review to verify`;
+        else if(r.job) d += `<br><span class="pill sale">Sold in LP</span> Job #${calH(r.job)} · ${calH(r.cdt)}${isSaleDisp(p.lead.di)?' · already '+calH(p.lead.di)+' in the Sheet':''}`;
+      }
+      return `<tr><td>${calH(r.lp)}</td><td>${calH(r.cu)}<div class="note" style="margin:0">${calH(r.ph)}</div></td><td>${calH(r.ct)}</td><td><span class="pill ${IMP_KIND[p.kind][1]}">${IMP_KIND[p.kind][0]}</span></td><td>${d}</td></tr>`;
+    }).join('')}
+    ${impTab==='all' ? IMP.bad.map(b=>`<tr><td>—</td><td colspan="3">Line ${b.line}: ${calH(b.text)}</td><td><span class="pill cxl">Could not read</span></td></tr>`).join('') : ''}
+    </tbody></table></div>
+    <div class="imp-safety">🛟 <b>Before your first real import:</b> in the Google Sheet, File → Version history → Name current version → "Before LP import". Google can restore the whole Sheet in two clicks.</div>
+    <div style="display:flex;gap:8px;margin-top:10px"><button class="btn" style="flex:1" onclick="impBack()">← Back</button>
+      <button class="btn primary" style="flex:1" id="impApplyBtn" onclick="impApply()">Apply import</button></div>`;
+}
+function impBack(){
+  const keep = IMP; openImport();
+  const sel = document.getElementById('impCv');
+  if(keep.isNew){ sel.value='__new'; document.getElementById('impNewName').value = keep.cv; document.getElementById('impArchive').checked = keep.archive; }
+  else sel.value = keep.cv;
+  document.getElementById('impPaste').value = keep.paste; impCvChanged();
+}
+function lpImportNote(r, created){
+  const bits = ['Imported from LP '+todayUS(), 'Prospect '+r.lp];
+  if(r.job) bits.push('Job #'+r.job, 'Contract '+r.cdt, 'Gross '+fmtMoney(r.amt));
+  if(r.zip) bits.push('Zip '+r.zip);
+  return {text: bits.join(' · '), cat:'LP Import', entered: localToday(), enteredBy:'LP import', lp:{prospect:r.lp, job:r.job||'', cdt:r.cdt||'', amt:r.amt||'', zip:r.zip||'', created:!!created}};
+}
+function newLeadFromLP(r, cv){
+  return {d:'', cv, lt:'', lp:r.lp, cu:r.cu, ph:r.ph, ad:r.ad, ct:r.ct, sa:'', la:'', sr:'', pr:'', di:'Needs LP check',
+    am: r.amt ? (Number(r.amt)||0) : '', il:true, no:'', calls:[], notesLog:[lpImportNote(r, true)]};
+}
+async function impApply(){
+  const k = impCounts();
+  if(!confirm(`Apply this import for ${IMP.cv}?\n\n• ${k.create} new leads created — hidden from the team until each is verified\n• ${k.fill} existing lead(s) get blank fields filled — nothing is overwritten\n• ${k.reviewItems} item(s) go to LP Review (conflicts / skipped / LP-sold)\n\nNothing is lost if you stop halfway — everything waits in LP Review.`)) return;
+  const btn = document.getElementById('impApplyBtn'); btn.disabled = true; btn.textContent = 'Saving…';
+  const cv = IMP.cv, P = IMP.plan;
+  const adds = P.filter(p=>p.kind==='create').map(p=>newLeadFromLP(p.r, cv));
+  const fills = P.filter(p=>p.lead && Object.keys(p.fills).length).map(p=>({rowId:p.lead.rowId, fields:p.fills}));
+  const reviews = [];
+  P.forEach(p=>{
+    const base = {cv, lp:p.r.lp, cu:p.r.cu, ct:p.r.ct};
+    p.conflicts.forEach(c=>reviews.push({...base, type:'conf', field:c.field, lpVal:c.lpVal, sheetVal:c.sheetVal, row:p.lead.rowId, detail:{label:c.label}}));
+    if(p.sold) reviews.push({...base, type:'sold', field:'di', lpVal:'Sold · Job #'+p.sold.job, sheetVal:p.lead.di||'', row:p.lead.rowId, detail:{r:p.r}});
+    if(p.kind==='dup') reviews.push({...base, type:'dup', field:'', row:p.rows.join(','), detail:{why:p.why, rows:p.rows, r:p.r}});
+    if(p.kind==='diff') reviews.push({...base, type:'diff', field:'', row:p.lead.rowId, detail:{why:p.why, r:p.r}});
+  });
+  try{
+    const res = await api('bulkImport', {adds, fills, reviews});
+    if(!res || !res.ok) throw new Error((res && res.error) || 'import failed');
+    if(IMP.isNew && IMP.archive){ try{ await api('saveSetting', {cv, active:false}); }catch(e){ console.error(e); } }
+    await loadData();
+    document.getElementById('importBody').innerHTML = `<button class="modal-close" onclick="closeImport()">&times;</button>
+      <h2>✅ Import complete — ${calH(cv)}</h2>
+      <div class="imp-safety" style="background:var(--sale-bg);color:var(--sale);border-color:var(--sale)">Saved in one step: <b>${res.added}</b> new leads created (hidden from the team until verified), <b>${res.filled}</b> blank field(s) filled. <b>No existing value was overwritten.</b> <b>${res.reviewsAdded}</b> new item(s) added to LP Review${reviews.length>res.reviewsAdded?` (${reviews.length-res.reviewsAdded} were already there)`:''}.</div>
+      <div style="display:flex;gap:8px;margin-top:10px"><button class="btn" style="flex:1" onclick="openImport()">Import another canvasser</button><button class="btn primary" style="flex:1" onclick="closeImport();rvCv=IMP.cv;openReview()">Open LP Review →</button></div>`;
+  }catch(e){
+    if(e.message==='admin_unauthorized' || e.message==='unauthorized') return;
+    btn.disabled = false; btn.textContent = 'Apply import';
+    alert('Import failed — nothing was saved. ('+e.message+')');
+  }
+}
+
+// ---------- LP Review (supervisors only) ----------
+let rvCv = '__all', rvType = 'all', RV = [];
+function buildReviewList(){
+  const items = [];
+  // imported leads: open until their disposition is set (then they're visible to the team and counted)
+  DATA.forEach(r=>{
+    const info = lpInfo(r); if(!info || !info.created) return; // only leads the import CREATED
+    items.push({key:'L'+r.rowId, kind:'lead', type: info.job ? 'sale' : 'new', cv: r.cv, lead:r, info, open: isPendingLP(r)});
+  });
+  REVIEW_ITEMS.forEach(i=>items.push({key:'R'+i.id, kind:'stored', type:i.type, cv: canonCv(i.cv), item:i, lead: i.row && !String(i.row).includes(',') ? findRow(i.row) : null, open: i.status!=='resolved'}));
+  return items;
+}
+const RV_TYPE = {sale:['💜 Sale to verify','pur'], sold:['💜 LP shows sold','pur'], new:['🆕 New · needs disposition','info'], conf:['⚠ Conflict','pend'], dup:['⛔ Same Prospect ID twice','cxl'], diff:['⛔ Possible match · different ID','cxl']};
+const RV_DISPS = ['Demo No Sale','Demo (1-Leg)','Cancelled','Customer No Show','Call To Cancel','Customer Cancel at Door','Unconfirmed','Called To Confirm','Data','Set'];
+function openReview(cv){
+  if(!ADMIN_ON){ adminButton(); return; }
+  if(cv) rvCv = cv;
+  renderReviewModal();
+  document.getElementById('reviewModal').classList.add('open');
+}
+function rvMatchType(i, t){ return t==='all' || (t==='sale' ? (i.type==='sale'||i.type==='sold') : t==='skip' ? (i.type==='dup'||i.type==='diff') : i.type===t); }
+function renderReviewModal(){
+  RV = buildReviewList();
+  const cvs = [...new Set(RV.map(i=>i.cv))].filter(Boolean).sort((a,b)=>a.localeCompare(b));
+  if(rvCv!=='__all' && !cvs.includes(rvCv)) rvCv = '__all';
+  const inCv = RV.filter(i=>rvCv==='__all' || i.cv===rvCv);
+  const openN = l=>l.filter(i=>i.open).length;
+  const types = [['all','All'],['sale','💜 Sales to verify'],['new','🆕 New'],['conf','⚠ Conflicts'],['skip','⛔ Skipped']];
+  const total = inCv.length, cleared = total - openN(inCv), pct = total ? Math.round(cleared/total*100) : 100;
+  const order = {sale:0, sold:0, conf:1, dup:2, diff:2, new:3};
+  const list = inCv.filter(i=>rvMatchType(i, rvType)).sort((a,b)=>(b.open-a.open) || order[a.type]-order[b.type]);
+  const shown = list.filter(i=>i.open).concat(list.filter(i=>!i.open).slice(0,15));
+  const allOpen = openN(RV);
+  document.getElementById('reviewBody').innerHTML = `<button class="modal-close" onclick="closeReview()">&times;</button>
+    <h2>🔎 LP Review <span class="note" style="font-weight:400">· supervisors only · saved in the Sheet ("LP Review" tab)</span></h2>
+    <div class="field" style="margin-top:8px"><label>Canvasser</label><select id="rvCvSel" onchange="rvCv=this.value;renderReviewModal()">
+      <option value="__all">All canvassers (${allOpen} left)</option>
+      ${cvs.map(c=>{ const l=RV.filter(i=>i.cv===c), o=openN(l); return `<option value="${calH(c)}" ${c===rvCv?'selected':''}>${o?'':'✅ '}${calH(c)}${isActiveCanvasser(c)?'':' (archived)'} — ${o? o+' left' : 'done'}</option>`; }).join('')}
+    </select></div>
+    <div class="tabs" style="margin-bottom:6px">${types.map(([t,l])=>`<div class="tab ${t===rvType?'active':''}" onclick="rvType='${t}';renderReviewModal()">${l} (${openN(inCv.filter(i=>rvMatchType(i,t)))})</div>`).join('')}</div>
+    <div style="display:flex;justify-content:space-between;font-size:12.5px;margin:4px 0"><span><b>${rvCv==='__all'?'All canvassers':calH(rvCv)}</b>: ${cleared} of ${total} cleared</span><span>${pct}%</span></div>
+    <div style="background:var(--bg);border-radius:6px;height:8px;margin-bottom:10px"><div style="background:${pct===100?'var(--sale)':'var(--info)'};width:${pct}%;height:8px;border-radius:6px"></div></div>
+    ${!allOpen ? `<div class="imp-safety" style="text-align:center;background:var(--sale-bg);color:var(--sale);border-color:var(--sale);font-size:14px">🎉 <b>All clear.</b> Every imported lead is verified and visible to the team.</div>`
+      : !openN(inCv) ? `<div class="imp-safety" style="background:var(--sale-bg);color:var(--sale);border-color:var(--sale)">✅ <b>${calH(rvCv)}</b> is done. Pick another canvasser above.</div>` : ''}
+    <div id="rvList">${shown.map((i,idx)=>rvItemHtml(i, RV.indexOf(i))).join('') || '<p class="note">Nothing here.</p>'}</div>`;
+  updateAdminUI();
+}
+function rvItemHtml(i, n){
+  const r = i.kind==='lead' ? {cu:i.lead.cu, ct:i.lead.ct, lp:i.lead.lp} : {cu:i.item.cu, ct:i.item.ct, lp:i.item.lp};
+  const head = `<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><div><b>${calH(r.cu)}</b> <span class="note" style="margin:0">· ${calH(r.ct)} · LP ${calH(r.lp)} · ${calH(i.cv)}</span></div><span class="pill ${RV_TYPE[i.type][1]}">${RV_TYPE[i.type][0]}</span></div>`;
+  if(!i.open){
+    const msg = i.kind==='lead' ? `Verified as <b>${calH(i.lead.di)}</b> — visible to the team` : `${calH(i.item.resolution||'Resolved')} <a href="#" onclick="rvUndo(${n});return false" style="color:var(--info)">undo</a>`;
+    return `<div class="logitem" style="opacity:.6">${head}<div class="meta">✅ ${msg}</div></div>`;
+  }
+  const dateIn = `<input type="date" id="rvDate${n}" style="width:auto" title="Appointment date (when it ran)">`;
+  let body = '';
+  if(i.type==='sale' || i.type==='sold'){
+    const info = i.kind==='lead' ? i.info : (i.item.detail && i.item.detail.r) || {};
+    body = `<div class="meta">LP: Job #${calH(info.job)} · sold ${calH(info.cdt)} (= sale date) · ${fmtMoney(info.amt)} gross${i.type==='sold'?` · the Sheet says <b>${calH(i.item.sheetVal||'—')}</b>`:''}. Check it in LP, then:</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;align-items:center"><select id="rvD${n}" style="width:auto"><option>Sale</option><option>Sale (WIP)</option><option>Sale (Declined)</option></select>
+      <input type="text" id="rvNet${n}" placeholder="Net $ (if shown)" style="width:130px">
+      <span class="note" style="margin:0">Appt date (optional)</span>${dateIn}
+      <button class="btn sm primary" onclick="rvVerifySale(${n})">✔ Verify</button>
+      ${i.type==='sold'?`<button class="btn sm" onclick="rvResolve(${n},'Kept the Sheet disposition')">Not sold — keep Sheet</button>`:''}
+      ${i.lead?`<button class="btn sm" onclick="rvOpenLead(${i.lead.rowId})">Open lead · screenshot</button>`:''}</div>`;
+  } else if(i.type==='new'){
+    body = `<div class="meta">Imported from LP — set the disposition LP shows. For DNS / 1-Leg, add the appointment date so it lands in the right pay period. Or open the lead and update from a screenshot to get everything.</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;align-items:center"><select id="rvD${n}" style="width:auto">${RV_DISPS.map(d=>`<option>${d}</option>`).join('')}</select>
+      <span class="note" style="margin:0">Appt date</span>${dateIn}
+      <button class="btn sm primary" onclick="rvSetDisp(${n})">✔ Save</button>
+      <button class="btn sm" onclick="rvOpenLead(${i.lead.rowId})">Open lead · screenshot</button></div>`;
+  } else if(i.type==='conf'){
+    const lab = (i.item.detail && i.item.detail.label) || i.item.field, money = i.item.field==='am';
+    body = `<div style="margin:6px 0;font-size:12.5px"><b>${calH(lab)}</b>: LP <span style="color:var(--info);font-weight:600">${calH(money?fmtMoney(i.item.lpVal):i.item.lpVal)}</span> vs Sheet <span style="color:var(--sale);font-weight:600">${calH(money?fmtMoney(i.item.sheetVal):i.item.sheetVal)}</span>${i.lead?'':' <span class="note">(Sheet lead no longer found)</span>'}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${i.lead?`<button class="btn sm primary" onclick="rvUseLP(${n})">Use LP value</button>`:''}
+      <button class="btn sm" onclick="rvResolve(${n},'Kept the Sheet value')">Keep Sheet</button>
+      ${i.lead?`<button class="btn sm" onclick="rvOpenLead(${i.lead.rowId})">Open lead</button>`:''}</div>`;
+  } else if(i.type==='dup'){
+    const rows = (i.item.detail && i.item.detail.rows) || [];
+    body = `<div class="meta">${calH((i.item.detail||{}).why||'')}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${rows.length?`<button class="btn sm primary" onclick="rvMerge(${rows[0]})">Open merge tool</button>`:''}
+      <button class="btn sm" onclick="rvResolve(${n},'Duplicates handled')">Mark resolved</button></div>`;
+  } else if(i.type==='diff'){
+    body = `<div class="meta">${calH((i.item.detail||{}).why||'')}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${i.lead?`<button class="btn sm primary" onclick="rvLink(${n})">Same customer — link</button>`:''}
+      <button class="btn sm" onclick="rvCreateNew(${n})">Different customer — create new</button>
+      <button class="btn sm" onclick="rvResolve(${n},'Ignored')">Ignore</button>
+      ${i.lead?`<button class="btn sm" onclick="rvOpenLead(${i.lead.rowId})">Open Sheet lead</button>`:''}</div>`;
+  }
+  return `<div class="logitem">${head}${body}</div>`;
+}
+async function rvUpdateLead(rowId, changes){
+  const r = findRow(rowId); if(!r) throw new Error('lead not found');
+  const before = {...r};
+  Object.assign(r, changes);
+  r.notesLog = withResultEvent(before, r);
+  const res = await api('update', {rowId: r.rowId, fields: r});
+  if(!res || !res.ok) throw new Error((res && res.error) || 'save failed');
+}
+async function rvAfter(){ await loadData(); renderReviewModal(); }
+async function rvRun(fn){ try{ await fn(); await rvAfter(); }catch(e){ if(!/unauthorized/.test(e.message)) alert('Could not save — '+e.message); } }
+function rvResolve(n, resolution){ const i = RV[n]; rvRun(async()=>{ const res = await api('reviewResolve', {id:i.item.id, status:'resolved', resolution}); if(!res.ok) throw new Error(res.error); }); }
+function rvUndo(n){ const i = RV[n]; rvRun(async()=>{ await api('reviewResolve', {id:i.item.id, status:'open'}); }); }
+function rvSetDisp(n){
+  const i = RV[n], di = document.getElementById('rvD'+n).value, date = document.getElementById('rvDate'+n).value;
+  if(resultGroup(di) && !date){ alert('Pick the appointment date for a '+di+' — it decides which pay period it counts in.'); return; }
+  rvRun(()=>rvUpdateLead(i.lead.rowId, {di, ...(date ? {la: date} : {})}));
+}
+function rvVerifySale(n){
+  const i = RV[n], di = document.getElementById('rvD'+n).value, net = document.getElementById('rvNet'+n).value.replace(/[$,\s]/g,''), date = document.getElementById('rvDate'+n).value;
+  rvRun(async()=>{
+    if(i.kind==='lead'){
+      await rvUpdateLead(i.lead.rowId, {di, ...(net!=='' ? {netAm: Number(net)||0} : {}), ...(date ? {la: date} : {})});
+    } else {
+      const lead = i.lead; if(!lead) throw new Error('Sheet lead not found');
+      const d = (i.item.detail && i.item.detail.r) || {};
+      const notes = (lead.notesLog||[]).concat(lpInfo(lead) ? [] : [lpImportNote(d)]); // adds the LP contract date so the sale lands in the right month
+      await rvUpdateLead(lead.rowId, {di, notesLog: notes, ...(lead.am==='' || lead.am==null ? {am: Number(d.amt)||0} : {}), ...(net!=='' ? {netAm: Number(net)||0} : {}), ...(date ? {la: date} : {})});
+      const res = await api('reviewResolve', {id:i.item.id, status:'resolved', resolution:'Verified as '+di}); if(!res.ok) throw new Error(res.error);
+    }
+  });
+}
+function rvUseLP(n){
+  const i = RV[n], f = i.item.field; let v = i.item.lpVal; if(f==='am') v = Number(v)||0;
+  rvRun(async()=>{ await rvUpdateLead(i.lead.rowId, {[f]: v}); const res = await api('reviewResolve', {id:i.item.id, status:'resolved', resolution:'Changed to the LP value'}); if(!res.ok) throw new Error(res.error); });
+}
+function rvLink(n){
+  const i = RV[n], d = (i.item.detail && i.item.detail.r) || {};
+  if(!confirm(`Link LP Prospect ${d.lp} (${d.cu}) to Sheet lead "${i.lead.cu}"?\nIts LP ID changes from ${i.lead.lp||'(blank)'} to ${d.lp}.`)) return;
+  rvRun(async()=>{ await rvUpdateLead(i.lead.rowId, {lp: d.lp, il:true, notesLog: (i.lead.notesLog||[]).concat(lpInfo(i.lead) ? [] : [lpImportNote(d)])}); const res = await api('reviewResolve', {id:i.item.id, status:'resolved', resolution:'Linked to Sheet row '+i.lead.rowId}); if(!res.ok) throw new Error(res.error); });
+}
+function rvCreateNew(n){
+  const i = RV[n], d = (i.item.detail && i.item.detail.r) || {};
+  rvRun(async()=>{ const res = await api('bulkImport', {adds:[newLeadFromLP(d, canonCv(i.item.cv))], fills:[], reviews:[]}); if(!res.ok) throw new Error(res.error); const r2 = await api('reviewResolve', {id:i.item.id, status:'resolved', resolution:'Created as a separate new lead'}); if(!r2.ok) throw new Error(r2.error); });
+}
+function rvOpenLead(rowId){ closeReview(); openDetail(String(rowId)); }
+function rvMerge(rowId){ closeReview(); openDetail(String(rowId)); openMerge(String(rowId)); }
+document.getElementById('importModal').addEventListener('click', e=>{ if(e.target.id==='importModal') closeImport(); });
+document.getElementById('reviewModal').addEventListener('click', e=>{ if(e.target.id==='reviewModal') closeReview(); });
